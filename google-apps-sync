@@ -1,0 +1,1492 @@
+#!/usr/bin/perl -w
+# Brno University of Technology
+# Tomas Kreuzwieser <kreuzwieser@ro.vutbr.cz>, 2014, 2015
+
+# TODO:
+# doplnit podporu pro orgunits
+# neukladat data cache co se nemenila
+# otestovat http://stackoverflow.com/questions/7809740/how-can-i-catch-a-failed-to-decode-json-error-message-in-perl na test spravnosti jsonu
+
+##############################################################################
+# MODULES
+##############################################################################
+
+use utf8;
+use locale;
+use encoding 'utf8';
+use strict;
+use warnings;
+use Data::Dumper;
+use Storable;
+use JSON;
+use JSON::WebToken;
+use HTML::Entities;
+use LWP::UserAgent;
+use Net::LDAP;
+use Net::LDAP::Control::Paged;
+use Net::LDAP::Constant qw(LDAP_CONTROL_PAGED);
+use LWP::Parallel::UserAgent;
+use HTTP::Request;
+use Getopt::Long;
+use Monitoring;
+use Caching qw(load_scopes_from_cache_dir save_scopes_to_cache_dir get_data_from_json_file);
+use Diff;
+use MIME::Base64 qw(encode_base64 decode_base64 encode_base64url decode_base64url);
+use Encode qw(encode);
+#use MIME::Base64::URLSafe;
+use Try::Tiny;
+
+##############################################################################
+# DUMPER SETTINGS
+##############################################################################
+
+# Dumper formating, necessary for data comparioson
+$Data::Dumper::Terse    = 1;
+$Data::Dumper::Indent   = 1;
+$Data::Dumper::Deepcopy = 1;
+$Data::Dumper::Sortkeys = 1;
+$Data::Dumper::Useqq    = 1;
+$Data::Dumper::Deparse  = 1;
+
+# Redefine output of Data::Dumper
+{
+    no warnings 'redefine';
+    sub Data::Dumper::qquote {
+        return shift
+    }
+}
+
+##############################################################################
+# LWP options
+##############################################################################
+
+BEGIN {
+    $ENV{PERL_NET_HTTPS_SSL_SOCKET_CLASS} = "Net::SSL";
+    $ENV{PERL_LWP_SSL_VERIFY_HOSTNAME} = 0;
+}
+
+# LWP::Parallet options
+use constant LWP_MAX_REQ      => 10;
+use constant LWP_TIMEOUT      => 3;
+
+##############################################################################
+# Organization specified
+##############################################################################
+
+use config::GoogleAppSyncSettings;
+
+my $APPS_CONFIG = GoogleAppSyncSettings::get_APPS_CONFIG();
+my $LDAP_CONFIG = GoogleAppSyncSettings::get_LDAP_CONFIG();
+my $LDAP_SEARCH = GoogleAppSyncSettings::get_LDAP_SEARCH();
+
+##############################################################################
+# GLOBAL VARIABLES and CONSTANTS
+##############################################################################
+
+# security oauth2 token
+my $access_token = undef;
+
+# default debug settings
+my $DEBUG         = 4; # 0 - 5
+
+# default process or simulate only (1 = process)
+my $PROCESS       = 1;
+
+# default is disable users and groups deletions
+my $REMOVEENABLE  = 0;
+
+# transform default operation code to user readable string
+my $beautify_comp_debug = {
+    SAME      => "SAME",
+    CHANGE    => "CHANGE",
+    DISCARD_A => "REMOVE",
+    DISCARD_B => "ADD",
+};
+
+# flush cache for objects after this time [s]
+my $cachetime = {
+    apps => {
+        users    => 24 * 3600,
+        groups   => 24 * 3600,
+        members  => 7 * 24 * 3600,
+        orgunits => 7 * 24 * 3600,
+        photos   => 7 * 24 * 3600,
+    },
+    ldap => {
+	users    => 24 * 3600,
+	groups   => 24 * 3600,
+	orgunits => 24 * 3600,
+	photos   => 24 * 3600,
+    },
+};
+
+# configuration for data sumarization
+my $ldap_sumarize_config = {
+	users => {
+	    ids => {
+		member => 'userPrincipalName',
+		parent => 'mail',
+	    },
+	},
+	groups => {
+	    ids => {
+		member => 'mail',
+		parent => 'mail',
+	    },
+	},
+};
+
+##############################################################################
+# FUNCTIONS
+##############################################################################
+
+# connect AD/LDAP
+sub AD_Connect
+{
+    my ($ldap_host, $ldap_user, $ldap_password) = @_;
+
+    my $ldap = Net::LDAP->new($ldap_host, version => 3) or die "unable to co nnect to ad ldap: $@";
+    my $result = $ldap->bind($ldap_user, password => $ldap_password, version => 3);
+    die "error binding to ad ldap: ", $result->error if ($result->code);
+
+    return $ldap;
+}
+
+# disconnect AD/LDAP
+sub AD_Close
+{
+    my ($ldap) = @_;
+
+    $ldap->unbind;
+}
+
+# load data from AD/LDAP
+# nevim proc, ale hodnoty je nutne prohanet pres sprintf
+sub AD_get_data_from_ldap
+{
+    my ($ldap, $base, $base_dn, $searchtype, $add_params) = @_;
+
+    my $save_byDN = 0;
+
+    # AD requires paged searches to return more than 1000 objects 
+    my $page = Net::LDAP::Control::Paged->new(size => 1000);
+
+    my $params = {
+	users => {
+	    ident_field   => "employeeID",
+	    search_params => [
+		base      => "$base_dn,$base",
+		filter    => "(&(objectCategory=person)(objectClass=user))",
+		control   => [ $page ],
+		attrs     => [ "sAMAccountName", "givenName", "sn", "name", "userPrincipalName", "displayName", "employeeID", "whenChanged", "userAccountControl", "memberOf", "proxyAddresses" ],
+	    ],
+	},
+	photos => {
+	    ident_field   => "employeeID",
+	    search_params => [
+		base      => "$base_dn,$base",
+		filter    => "(&(objectCategory=person)(objectClass=user))",
+		control   => [ $page ],
+		attrs     => [ "employeeID", "thumbnailPhoto" ],
+	    ],
+	},
+	orgunits => {
+	    ident_field   => "adminDescription",
+	    search_params => [
+		base      => "$base_dn,$base",
+		filter    => "(&(objectclass=organizationalUnit))",
+		control   => [ $page ],
+		attrs     => [ "ou", "description", "adminDescription", "whenChanged" ],
+	    ],
+	},
+	groups => {
+	    ident_field   => "gidNumber",
+	    search_params => [
+		base      => "$base", # we have to search the entire tree, otherwise it did not work eg remove CN=Domain Admins,CN=Users,DC=vutbr,DC=cz from CN=BUT-Tree users,OU=Brno University of Technology,OU=ALL-ORGUNITS,OU=SYNC,DC=vutbr,DC=cz
+		filter    => "(&(objectcategory=group))",
+		control   => [ $page ],
+		attrs     => [ "description", "cn", "whenChanged", "gidNumber", "sAMAccountName", "memberOf", "mail", "proxyAddresses" ],
+	    ],
+	},
+    };
+
+    # add checked params to array
+    if (defined $add_params->{$searchtype})
+    {
+	foreach my $dbkey (keys $add_params->{$searchtype}->{db_to_ad})
+	{
+	    if ($add_params->{$searchtype}->{db_to_ad}->{$dbkey}->{extracheck})
+	    {
+		my %arrhash = @{$params->{$searchtype}->{search_params}};
+		push($arrhash{attrs}, $add_params->{$searchtype}->{db_to_ad}->{$dbkey}->{name});
+	    }
+	}
+    }
+
+    my $ad_data = ();
+    my $cookie;
+    while (1)
+    {
+	# Perform search
+	my $mesg = $ldap->search(@{$params->{$searchtype}->{search_params}});
+	if (defined $params->{$searchtype})
+	{
+	    foreach my $entr ($mesg->entries)
+	    {
+		my $id = undef;
+
+		my $dn = $entr->dn;
+		utf8::decode($dn);
+		
+		if (defined ($id = $entr->get_value($params->{$searchtype}->{ident_field})))
+		{
+		    $ad_data->{byID}->{$id}->{DN} = $dn;
+		}
+
+		foreach my $attr ( sort $entr->attributes )
+		{
+		    next if ( $attr =~ /;binary$/ );
+
+		    if (($attr eq 'memberOf') || ($attr eq 'proxyAddresses'))
+		    { # arrays
+			foreach my $aname ($entr->get_value($attr))
+			{
+			    utf8::decode($aname);
+			    $ad_data->{byID}->{$id}->{$attr}->{$aname} = 1 if (defined $id);
+			    $ad_data->{byDN}->{$dn}->{$attr}->{$aname} = 1 if ($save_byDN);
+			}
+		    }
+		    elsif ($attr eq 'thumbnailPhoto')
+		    {
+			my $aname = encode_base64url($entr->get_value($attr));
+			$ad_data->{byID}->{$id}->{$attr} = $aname if (defined $id);
+			$ad_data->{byDN}->{$dn}->{$attr} = $aname if ($save_byDN);
+		    }
+		    else
+		    {
+			my $aname = $entr->get_value($attr);
+			utf8::decode($aname);
+			$ad_data->{byID}->{$id}->{$attr} = $aname if (defined $id);
+			$ad_data->{byDN}->{$dn}->{$attr} = $aname if ($save_byDN);
+		    }
+		}
+	    }
+	}
+
+	# Only continue on LDAP_SUCCESS
+	$mesg->code  and last;
+
+	# Get cookie from paged control
+	my($resp)  = $mesg->control( LDAP_CONTROL_PAGED ) or last;
+	$cookie    = $resp->cookie or last;
+
+	# Set cookie in paged control
+	$page->cookie($cookie);
+    }
+
+    if ($cookie)
+    {
+	# We had an abnormal exit, so let the server know we do not want any more
+	$page->cookie($cookie);
+	$page->size(0);
+	$ldap->search(@{$params->{$searchtype}->{search_params}});
+    }
+
+    return $ad_data;
+}
+
+# load data from AD/LDAP (all scopes)
+sub AD_get_all_data_from_ldap
+{
+    my ($apps_data, $cache_time) = @_;
+
+    my $ldap = AD_Connect($LDAP_CONFIG->{LDAP_HOST}, $LDAP_CONFIG->{LDAP_USER}, $LDAP_CONFIG->{LDAP_PASSWORD});
+
+    foreach my $searchtype (keys %{$LDAP_SEARCH->{DN}})
+    {
+	if ((!defined $apps_data->{ldap}->{$searchtype}->{last}) || (($apps_data->{ldap}->{$searchtype}->{last} < (time - $cache_time->{$searchtype}))))
+	{
+	    debug("Loading ldap data for $searchtype", 'white', ($DEBUG > 3));
+	    $apps_data->{ldap}->{$searchtype}->{data} = AD_get_data_from_ldap($ldap, $LDAP_SEARCH->{BASE}, $LDAP_SEARCH->{DN}->{$searchtype}, $searchtype, {});
+	    $apps_data->{ldap}->{$searchtype}->{last} = time;
+	}
+	else
+	{
+	    debug("Ldap data for $searchtype already cached", 'white', ($DEBUG > 4));
+	}
+    }
+
+    # odpojeni od AD
+    AD_Close($ldap);
+}
+
+# load configuration from JSON file
+sub get_client_data_from_json_file
+{
+    my $data = get_data_from_json_file(@_);
+
+    return ((defined $data) ? $data->{private_key} : undef, (defined $data) ? $data->{client_email} : undef);
+}
+
+# generate JWT JSON token for google APPS
+sub generate_json_auth_token
+{
+    my ($prn, $privkey, $iss) = @_;
+
+    my $wtoken = JSON::WebToken->encode(
+	{
+	    # your service account id here
+	    iss   => $iss,
+	    scope => 'https://www.googleapis.com/auth/admin.directory.user https://www.googleapis.com/auth/admin.directory.group https://www.googleapis.com/auth/admin.directory.group.member https://www.googleapis.com/auth/admin.directory.orgunit',
+	    aud   => 'https://accounts.google.com/o/oauth2/token',
+	    exp   => time + 3600,
+	    iat   => time,
+	    # To access the google admin sdk with a service account
+	    #  the service account must act on behalf of an account
+	    # that has admin privileges on the domain
+	    # Otherwise the token will be returned but API calls will generate a 403
+	    prn   => $prn,
+	},
+	$privkey,
+	'RS256',
+	{
+	    typ => 'JWT'
+	}
+    );
+
+    return $wtoken;
+}
+
+# get acces token from Google oauth2
+sub get_access_token
+{
+    if (defined $access_token)
+    {
+	return $access_token;
+    }
+    else
+    {
+	debug("Generate new access token", 'green', ($DEBUG > 4));
+
+	if (defined (my $json_wtoken = generate_json_auth_token($APPS_CONFIG->{APPS_USER}, get_client_data_from_json_file($APPS_CONFIG->{APPS_OAUTHCONF}))))
+	{
+	    my $ua = LWP::UserAgent->new();
+	    my $access_response = $ua->post('https://accounts.google.com/o/oauth2/token', {grant_type => encode_entities('urn:ietf:params:oauth:grant-type:jwt-bearer'), assertion => $json_wtoken});
+
+	    if ($access_response->is_success())
+	    {
+		my $access_data = decode_json($access_response->content);
+		debug($access_data->{access_token}, 'green', ($DEBUG > 4));
+		$access_token = $access_data->{access_token};
+	    }
+	    else
+	    {
+		if ($access_response->code eq 403)
+		{
+		    if (defined (my $content = decode_json($access_response->{_content})))
+		    {
+			if ((defined $content->{error}) && ($content->{error}=~/access_denied/) && ($content->{error_description}=~/Requested client not authorized/))
+			{
+			    debug("Access denied. Requested client not authorized.", 'red');
+			    debug(sprintf("* 1) change Google APPS settings in this code"), 'red');
+			    debug(sprintf("* 2) create new service ID (service): https://console.developers.google.com"), 'red');
+			    debug(sprintf("* 3) download JSON key configuration to %s", $APPS_CONFIG->{APPS_OAUTHCONF}), 'red');
+			    debug(sprintf("* 4) enable API in admin console and add permission to all required scopes: https://admin.google.com"), 'red');
+			    debug("Good step-by-step documentation is GAM wiki: https://github.com/jay0lee/GAM/wiki", 'red');
+			    exit(1);
+			}
+		    }
+		}
+		print_error_response($access_response);
+		$access_token = undef;
+	    }
+	}
+    }
+
+    return $access_token
+}
+
+# debug print for web responses
+sub print_error_response
+{
+    my ($response) = @_;
+
+    debug(sprintf("ERROR:"), 'red');
+    debug(Dumper($response), 'red');
+    debug(sprintf("code:", $response->code), 'red');
+    debug(sprintf("messag: ", $response->message), 'red');
+    debug(sprintf("content: ", $response->content), 'red');
+
+    return undef;
+}
+
+# create new parallel useragent object, timeout in seconds
+sub generate_parallel_useragent
+{
+    my $pua = LWP::Parallel::UserAgent->new();
+    $pua->max_req(LWP_MAX_REQ);
+    $pua->timeout(LWP_TIMEOUT);
+
+    return $pua;
+}
+
+# register prepared requests for parallel useragent
+sub register_requests
+{
+    my ($pua, $requests) = @_;
+
+    my $counter = 0;
+    foreach my $request (@$requests)
+    {
+	debug(sprintf("Registering request %d/%d: %s %s", ++$counter, scalar(@$requests), $request->method, $request->url), 'green', ($DEBUG > 2));
+	debug(sprintf("Request: %s", Dumper($request)), 'green', ($DEBUG > 4));
+
+	if (my $response = $pua->register ($request))
+	{
+	    debug(sprintf("Error registering request: %s", $response->error_as_HTML), 'red');
+	}
+    }
+
+    return get_number_of_requests($pua);
+}
+
+# get number of requests from parallel useragent object
+sub get_number_of_requests
+{
+    my ($pua) = @_;
+
+    return scalar(keys %{$pua->{entries_by_requests}});
+}
+
+# get data from Google APPS in parallel
+sub get_apps_data_single_scope_parallel
+{
+    my ($cache_time, $data, $scope, $objs, $purge_all) = @_;
+
+    my $iter_counter   = 0;
+    my $objs_data      = ();
+    my $objs_nicache   = ();
+
+    foreach my $requestobjectid (@$objs)
+    {
+	$requestobjectid = 1 if (!defined $requestobjectid);
+	if ((!defined $data->{apps}->{$scope}->{$requestobjectid}->{last}) || (($data->{apps}->{$scope}->{$requestobjectid}->{last} < (time - $cache_time))))
+	{
+	    $objs_nicache->{$requestobjectid} = 1;
+	    $objs_data->{$requestobjectid}    = {
+		domain          => $APPS_CONFIG->{APPS_DOMAIN},
+		maxResults      => $APPS_CONFIG->{APPS_MAXRESULTS},
+		customer        => $APPS_CONFIG->{APPS_CUSTOMER},
+		scope           => $scope,
+		pageToken       => "",
+		object          => $requestobjectid,
+		requestobjectid => $requestobjectid,
+		page_counter    => 0,
+	    };
+	}
+	else
+	{
+	    debug("Google apps data for $scope/$requestobjectid already cached", 'white', ($DEBUG > 4));
+	}
+    }
+
+    while (my @ids = map {($objs_nicache->{$_}) ? $_ : ()} keys %{$objs_nicache})
+    { # do for all object not in cache
+	my %ids_metadata = map { $_ => { try => 1, success => 0 } } @ids;
+	my $process_status = process_parallel(\&requests_generator_load, $objs_data, \%ids_metadata);
+	if (ref($process_status) eq 'HASH')
+	{
+	    foreach my $requestobjectid (keys %{$process_status})
+	    {
+		if ((defined $process_status->{$requestobjectid}->{success}) && ($process_status->{$requestobjectid}->{success}))
+		{
+		    if (defined (my $content = $process_status->{$requestobjectid}->{content}))
+		    {
+			if (defined $content->{$scope}) # for users, groups, members
+			{
+			    if (ref($content->{$scope}) eq 'ARRAY')
+			    {
+				$data->{apps}->{$scope}->{$requestobjectid}->{hash} = {} if (!$objs_data->{$requestobjectid}->{page_counter});
+
+				foreach (@{$content->{$scope}})
+				{
+				    $data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$_->{id}} = $_;
+				}
+			    }
+			}
+			else # for photos
+			{
+			    $data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$requestobjectid} = $content;
+			}
+
+			if (defined $content->{nextPageToken})
+			{
+			    debug(sprintf("Load response OK for $requestobjectid (NEXT, PARTIAL COUNT: %d)", scalar keys(%{$data->{apps}->{$scope}->{$requestobjectid}->{hash}})), 'green', ($DEBUG > 3));
+			    $objs_data->{$requestobjectid}->{pageToken} = $content->{nextPageToken};
+			    $objs_data->{$requestobjectid}->{page_counter} ++;
+			}
+			else
+			{
+			    debug(sprintf("Load response OK for $requestobjectid (DONE, COUNT: %d)", scalar keys(%{$data->{apps}->{$scope}->{$requestobjectid}->{hash}})), 'green', ($DEBUG > 2));
+			    $objs_nicache->{$requestobjectid} = 0;
+			    $data->{apps}->{$scope}->{$requestobjectid}->{last} = time;
+			}
+		    }
+		    else
+		    {
+			debug("No content in http response for $requestobjectid, scope $scope", 'red');
+			exit(1);
+		    }
+		}
+		else
+		{
+		    debug("Failed response for $requestobjectid, scope $scope", 'red');
+		    exit(1);
+		}
+	    }
+	}
+    }
+}
+
+sub whitespaces_replace
+{
+    my ($str_for_test) = @_;
+
+    $str_for_test =~ s/\s//g;
+
+    return $str_for_test;
+}
+
+sub unknown_name_replace
+{
+    my ($str_for_test) = @_;
+
+    return $str_for_test ? $str_for_test : "Unknown";
+}
+
+sub patch_hash
+{
+    my ($source, $patch) = @_;
+
+    my $return = Storable::dclone($source);
+
+    foreach (keys %$return)
+    {
+	if (defined $patch->{$_})
+	{
+	    $return->{$_} = $patch->{$_};
+	}
+    }
+
+    foreach (keys %$patch)
+    {
+	$return->{$_} = $patch->{$_};
+    }
+
+    return $return;
+}
+
+sub get_id_from_externalIds_etc
+{
+    my ($object) = @_;
+
+    if (defined $object->{externalIds})
+    {
+	foreach my $arrofhash (@{$object->{externalIds}})
+	{
+	    return $arrofhash->{value} if (($arrofhash->{customType} eq "employeeID") && (defined $arrofhash->{value}))
+	}
+    }
+    elsif ($object->{isAdmin})
+    {
+	return undef; # ignore all admins without ID
+    }
+
+    return $object->{primaryEmail}; # id (for delete)
+}
+
+sub get_id_from_description
+{
+    my ($description) = @_;
+
+    if ((defined $description) && ($description =~ /\(([0-9]+)\)\s*$/))
+    {
+	return $1;
+    }
+
+    return undef;
+}
+
+sub diff_users
+{
+    my ($apps_data) = @_;
+
+    my $scope = 'users';
+    my $apps_ldapid_to_appsid = (); # conversion hash
+
+    my $users_apps = ();
+    foreach (keys %{$apps_data->{apps}->{$scope}->{1}->{hash}})
+    {
+	if (defined (my $id = get_id_from_externalIds_etc($apps_data->{apps}->{$scope}->{1}->{hash}->{$_})))
+	{
+	    $users_apps->{$id} = {
+		name                       => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{name},
+		primaryEmail               => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{primaryEmail},
+		externalIds                => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{externalIds},
+		kind                       => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{kind},
+		isDelegatedAdmin           => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{isDelegatedAdmin},
+		isMailboxSetup             => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{isMailboxSetup},
+		suspended                  => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{suspended},
+		orgUnitPath                => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{orgUnitPath},
+		isAdmin                    => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{isAdmin},
+		includeInGlobalAddressList => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{includeInGlobalAddressList},
+	    };
+	    # generate conversion hash
+	    $apps_ldapid_to_appsid->{$id} = $_;
+	}
+    }
+
+    my $users_ldap = ();
+    foreach (keys %{$apps_data->{ldap}->{$scope}->{data}->{byID}})
+    {
+	if (defined (my $id = $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}))
+	{
+	    $users_ldap->{$apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}} = {
+		name                       => {
+		                                fullName   => sprintf("%s %s", unknown_name_replace($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{givenName}), unknown_name_replace($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{sn})),
+		                                givenName  => unknown_name_replace($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{givenName}),
+		                                familyName => unknown_name_replace($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{sn})
+		                              },
+		primaryEmail               => lc($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{userPrincipalName}),
+		externalIds                => [
+		                                {
+		                                    value      => $id,
+		                                    type       => "custom",
+		                                    customType => "employeeID"
+		                                }
+		                              ],
+		kind                       => "admin#directory#user",
+		isDelegatedAdmin           => JSON::false,
+		isMailboxSetup             => JSON::true,
+		suspended                  => JSON::false,
+		orgUnitPath                => $APPS_CONFIG->{APPS_UD_OUP},
+		isAdmin                    => JSON::false,
+		includeInGlobalAddressList => JSON::true,
+	    };
+	}
+    }
+
+    my $arguments = {
+	    MAX_DEPTH   => 0,
+	    OWNDIFF_OUT => undef,
+	    OWNDIFF_IN  => {
+		scope                 => $scope,
+		apps_data_scope_part  => $apps_data->{apps}->{$scope}->{1}->{hash},
+		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
+		arrayids              => ['hash', 1],
+		source_for_patch      => { hashFunction => "SHA-1", password => $APPS_CONFIG->{APPS_UD_PASSHASH} },
+	    }
+	};
+
+    Diff::compare_and_process($users_apps, $users_ldap,
+	{
+	    MATCH     => sub {},
+	    DISCARD_A => \&callback_remove,
+	    DISCARD_B => \&callback_add,
+	    CHANGE    => \&callback_change,
+	},
+	undef,
+	$arguments,
+    );
+
+    return $arguments->{OWNDIFF_OUT};
+}
+
+sub diff_groups
+{
+    my ($apps_data) = @_;
+
+    my $scope = 'groups';
+    my $apps_ldapid_to_appsid = (); # conversion hash
+
+    my $groups_apps = ();
+    foreach (keys %{$apps_data->{apps}->{groups}->{1}->{hash}})
+    {
+	if (defined (my $id = get_id_from_description($apps_data->{apps}->{groups}->{1}->{hash}->{$_}->{description})))
+	{
+	    $groups_apps->{$id} = {
+		email       => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{email},
+		name        => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{name},
+		description => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{description},
+		kind        => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{kind},
+	    };
+	    # generate conversion hash
+	    $apps_ldapid_to_appsid->{$id} = $_;
+	}
+    }
+
+    my $groups_ldap = ();
+    foreach (keys %{$apps_data->{ldap}->{$scope}->{data}->{byID}})
+    {
+	if (defined (my $id = get_id_from_description($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{description})))
+	{
+	    $groups_ldap->{$id} = {
+		email       => $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{mail},
+		name        => whitespaces_replace(lc($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{sAMAccountName})),
+		description => $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{description},
+		kind        => "admin#directory#group",
+	    };
+	}
+    }
+
+    my $arguments = {
+	    MAX_DEPTH   => 0,
+	    OWNDIFF_OUT => undef,
+	    OWNDIFF_IN  => {
+		scope                 => $scope,
+		apps_data_scope_part  => $apps_data->{apps}->{$scope}->{1}->{hash},
+		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
+		arrayids              => ['hash', 1],
+		source_for_patch      => undef,
+	    },
+    };
+
+    Diff::compare_and_process($groups_apps, $groups_ldap,
+	{
+	    MATCH     => sub {},
+	    DISCARD_A => \&callback_remove,
+	    DISCARD_B => \&callback_add,
+	    CHANGE    => \&callback_change,
+	},
+	undef,
+	$arguments,
+    );
+
+    return $arguments->{OWNDIFF_OUT};
+}
+
+sub diff_members
+{
+    my ($apps_data) = @_;
+
+    my $scope = 'members';
+    my $apps_ldapid_to_appsid = (); # conversion hash
+
+    # prepare APPS site group members structure
+    my $apps_structgroups = ();
+    foreach my $groupid (keys %{$apps_data->{apps}->{members}})
+    {
+	if (defined $apps_data->{apps}->{groups}->{1}->{hash}->{$groupid})
+	{ # only valid groups, not all from cache
+	    if (defined (my $group_email = $apps_data->{apps}->{groups}->{1}->{hash}->{$groupid}->{email}))
+	    {
+		$apps_structgroups->{$group_email}->{groups} = {};
+		$apps_structgroups->{$group_email}->{users}  = {};
+
+		if (defined $apps_data->{apps}->{members}->{$groupid}->{hash})
+		{
+		    foreach my $member (keys %{$apps_data->{apps}->{members}->{$groupid}->{hash}})
+		    {
+			if ((defined $apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{type}) && (defined $apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{email}))
+			{
+			    my $member_email = $apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{email};
+			    $apps_structgroups->{$group_email}->{users}->{$member_email}  = 1 if ($apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{type} eq "USER");
+			    $apps_structgroups->{$group_email}->{groups}->{$member_email} = 1 if ($apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{type} eq "GROUP");
+
+			    # generate conversion hash (for members)
+			    $apps_ldapid_to_appsid->{members}->{$member_email} = $member;
+			}
+		    }
+		}
+
+		# generate conversion hash (for groups)
+		$apps_ldapid_to_appsid->{groups}->{$group_email} = $groupid;
+	    }
+	}
+    }
+
+    # prepare LDAP site group members structure
+    ## in this stepe prepare conversion hash table
+    my $byIDtoDN_converter;
+    foreach (keys %{$apps_data->{ldap}->{groups}->{data}->{byID}})
+    {
+	my $DN = $apps_data->{ldap}->{groups}->{data}->{byID}->{$_}->{DN};
+	$byIDtoDN_converter->{$DN} = $apps_data->{ldap}->{groups}->{data}->{byID}->{$_};
+    }
+
+    my $ldap_structgroups = ();
+    foreach my $scopeint ('users', 'groups')
+    {
+	foreach my $memintid (keys %{$apps_data->{ldap}->{$scopeint}->{data}->{byID}})
+	{
+	    if ($scopeint eq 'groups')
+	    { # only groups have members, initialize empty arrays for comparison
+		if (defined $apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{mail})
+		{
+		    $ldap_structgroups->{$apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{mail}}->{groups} = {} if (!defined ($ldap_structgroups->{$apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{mail}}->{groups}));
+		    $ldap_structgroups->{$apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{mail}}->{users}  = {} if (!defined ($ldap_structgroups->{$apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{mail}}->{users}));
+		}
+	    }
+
+	    if (defined $apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{memberOf})
+	    {
+		foreach my $pargroupdn (keys %{$apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{memberOf}})
+		{
+		    if ($pargroupdn=~/$LDAP_SEARCH->{MEMBEROF_TREE_LIMIT}->{$scopeint}$/)
+		    { # only object from tree for synchronization
+			if (defined (my $pargroupid = $byIDtoDN_converter->{$pargroupdn}->{$ldap_sumarize_config->{$scopeint}->{ids}->{parent}}))
+			{
+			    if (defined (my $memid = $apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{$ldap_sumarize_config->{$scopeint}->{ids}->{member}}))
+			    {
+				#if (($scopeint eq 'groups') || (($scopeint eq 'users') && ($apps_data->{ldap}->{$scopeint}->{data}->{byID}->{$memintid}->{userAccountControl} eq "66048")))
+				{ # only enabled users (or all groups)
+				    $ldap_structgroups->{$pargroupid}->{$scopeint}->{lc($memid)} = 1;
+				}
+			    }
+			}
+		    }
+		}
+	    }
+	}
+    }
+
+    my $arguments = {
+	    MAX_DEPTH   => 2,
+	    OWNDIFF_OUT => undef,
+	    OWNDIFF_IN  => {
+		scope                 => $scope,
+		apps_data_scope_part  => $apps_data->{apps}->{$scope},
+		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
+		arrayids              => ['hash', 1],
+		source_for_patch      => undef,
+	    },
+    };
+
+    # compare APPS and LDAP group members structures
+    Diff::compare_and_process($apps_structgroups, $ldap_structgroups,
+	{
+	    MATCH     => sub {},
+	    DISCARD_A => \&callback_member_remove,
+	    DISCARD_B => \&callback_member_add,
+	    CHANGE    => sub {},
+	},
+	undef,
+	$arguments,
+    );
+
+    return $arguments->{OWNDIFF_OUT};
+}
+
+sub diff_photos
+{
+    my ($apps_data) = @_;
+
+    my $scope = 'photos';
+    my $apps_ldapid_to_appsid = (); # conversion hash
+
+    my $photos_apps = ();
+    foreach (keys %{$apps_data->{apps}->{$scope}})
+    {
+	if (defined (my $id = get_id_from_externalIds_etc($apps_data->{apps}->{users}->{1}->{hash}->{$_})))
+	{
+	    if (defined $apps_data->{apps}->{$scope}->{$_}->{hash}->{$_}->{photoData})
+	    {
+		my $photodata = $apps_data->{apps}->{$scope}->{$_}->{hash}->{$_}->{photoData};
+		if ($photodata=~/^(.*)?[=]{1,2}$/)
+		{ # the '==' and '=' sequence indicate that the last group contained only 8 or 16 bits, respectively
+		    $photodata = $1;
+		}
+		$photos_apps->{$id} = {
+		    photoData => $photodata,
+		};
+	    }
+	    # generate conversion hash
+	    $apps_ldapid_to_appsid->{$id} = $_;
+	}
+    }
+
+    my $photos_ldap = ();
+    foreach (keys %{$apps_data->{ldap}->{$scope}->{data}->{byID}})
+    {
+	if (defined $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{thumbnailPhoto})
+	{
+	    if (defined (my $id = $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}))
+	    {
+		$photos_ldap->{$apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}} = {
+		    photoData => $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{thumbnailPhoto},
+		};
+	    }
+	}
+    }
+
+    my $arguments = {
+	    MAX_DEPTH   => 0,
+	    OWNDIFF_OUT => undef,
+	    OWNDIFF_IN  => {
+		scope                 => $scope,
+		apps_data_scope_part  => $apps_data->{apps}->{$scope},
+		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
+		arrayids              => ['hash'],
+		arrayids_add_add_id   => 1,
+		source_for_patch      => undef,
+	    },
+    };
+
+    # compare APPS and LDAP user photos structures
+    Diff::compare_and_process($photos_apps, $photos_ldap,
+	{
+	    MATCH     => sub {},
+	    DISCARD_A => \&callback_remove,
+	    DISCARD_B => \&callback_add,
+	    CHANGE    => \&callback_change,
+	},
+	undef,
+	$arguments,
+    );
+
+    return $arguments->{OWNDIFF_OUT};
+}
+
+sub process_parallel
+{
+    my ($requests_generator, $user_data, $ids) = @_;
+
+    my $process = 1;
+
+    while ((my %ids_index = map {$_ => $ids->{$_}->{try}} (map { (($ids->{$_}->{try} <= $APPS_CONFIG->{APPS_TRY_MAX}) && (!($ids->{$_}->{success}))) ? $_ : () } keys %{$ids})) && ($process))
+    {
+	my $pua = generate_parallel_useragent();
+
+	if (my $nof_requests = register_requests($pua, &$requests_generator($user_data, \%ids_index)))
+	{
+	    debug(sprintf("waiting for all %d threads", $nof_requests), 'white', ($DEBUG > 1));
+	    my $entries = $pua->wait();
+
+	    foreach my $entid (keys %$entries)
+	    {
+		my $api_response = $entries->{$entid}->response;
+		if (defined(my $requestobjectid = $api_response->{_request}->{_headers}->{requestobjectid}))
+		{
+		    if ($api_response->is_success()) # https status code is 2xx
+		    {
+			$ids->{$requestobjectid}->{success}  = 1;
+			$ids->{$requestobjectid}->{appsid}   = decode_json($api_response->{_request}->{_headers}->{requestarrayids}) if (defined $api_response->{_request}->{_headers}->{requestarrayids}); # not defined for load
+			$ids->{$requestobjectid}->{content}  = undef;
+
+			if (($api_response->content) && (defined (my $api_data = decode_json($api_response->content))))
+			{
+			    debug(sprintf("Parallel response OK for %s (content)", defined ($api_response->{_request}->{_headers}->{expectnewid}) ? $api_data->{id} : "REQUESTOBJECTID: requestobjectid"), 'green', ($DEBUG > 4));
+			    $ids->{$requestobjectid}->{appsid}[0] = $api_data->{id} if ((defined $api_response->{_request}->{_headers}->{expectnewid}) && ($api_response->{_request}->{_headers}->{expectnewid})); # not defined for load
+			    $ids->{$requestobjectid}->{content}   = $api_data;
+			}
+			else
+			{
+			    debug(sprintf("Parallel response OK for %s (no content)", $api_response->{_request}->{_headers}->{requestobjectid}), 'green', ($DEBUG > 4));
+			}
+		    }
+		    else
+		    {
+			my $api_data = undef;
+			$api_data = decode_json($api_response->content) if ((defined $api_response->content) && ($api_response->code == 404));
+
+			if ($api_response->code == 401)
+			{ # 401: invalid access token
+			    debug("Access token invalid. Trying again", 'yellow', ($DEBUG > 4));
+			    $access_token = undef; # invalidate access_token
+			}
+			elsif ($api_response->code == 503)
+			{ # 503: Service unavailable. Please try again
+			    debug("Service unavailable. Trying again", 'yellow', ($DEBUG > 4));
+			}
+			elsif (($api_response->code == 404) && (defined $api_data) && (defined $api_data->{error}->{message}) && ($api_response->{_request}->{_method} eq "GET") && ($api_data->{error}->{message} eq "Resource Not Found: photo"))
+			{ # photo for this user is not present (valid only for GET)
+			    debug(sprintf("Parallel response OK for $requestobjectid (with exit code 404 ~ no photo for this user defined) (DONE)"), 'green', ($DEBUG > 4));
+			    $ids->{$requestobjectid}->{success} = 1;
+			    $ids->{$requestobjectid}->{content} = {};
+			}
+			else
+			{
+			    debug(sprintf("ERROR answer for %s (%s) was %s : %s", $api_response->request->url, $requestobjectid, $api_response->code, $api_response->message), 'red');
+			    $ids->{$requestobjectid}->{try}++;
+			}
+		    }
+		}
+	    }
+	}
+	else
+	{ # end cycle
+	    $process = 0;
+	}
+    }
+
+    return $ids;
+}
+
+# function for replacement symbols {identifier} to real variables in $string from $data reference structure
+sub replace_id_to_data
+{
+    my ($string, $data) = @_;
+
+    #printf("$string: %s", Dumper($data));
+    while ($string =~ s/\{(.*?)\}(.*)$/$data->{$1}$2/g) {};
+
+    return $string;
+}
+
+##############################################################################
+# REQUEST generators
+##############################################################################
+
+# generator for "load data" operations
+sub requests_generator_load
+{
+    my ($data, $requested_ids, $action, $uri_str) = @_;
+
+    my $uri_load = {
+	groups   => "https://www.googleapis.com/admin/directory/v1/{scope}?domain={domain}&maxResults={maxResults}&pageToken={pageToken}",
+	users    => "https://www.googleapis.com/admin/directory/v1/{scope}?domain={domain}&maxResults={maxResults}&pageToken={pageToken}",
+	members  => "https://www.googleapis.com/admin/directory/v1/groups/{object}/members?roles=MEMBER&maxResults={maxResults}&pageToken={pageToken}",
+	orgunits => "https://www.googleapis.com/admin/directory/v1/customer/{customer}/orgunits?type=all",
+	photos   => "https://www.googleapis.com/admin/directory/v1/users/{object}/{scope}/thumbnail",
+    };
+
+    my $requests = [];
+    foreach my $requestobjectid (keys %{$data})
+    {
+	if ((defined $requested_ids->{$requestobjectid}) && ($requested_ids->{$requestobjectid}))
+	{
+	    if (defined $data->{$requestobjectid}->{pageToken})
+	    {
+		my $req = HTTP::Request->new('GET', replace_id_to_data($uri_load->{$data->{$requestobjectid}->{scope}}, $data->{$requestobjectid}));
+		$req->header(
+		    'requestobjectid' => $data->{$requestobjectid}->{requestobjectid},
+		    'requestarrayids' => $data->{$requestobjectid}->{requestarrayids},
+		    'expectnewid'     => $data->{$requestobjectid}->{expectnewid},
+		    'debuginfo'       => $data->{$requestobjectid}->{debuginfo},
+		    'try'             => $requested_ids->{$requestobjectid},
+		    'authorization'   => sprintf("Bearer %s", get_access_token()),
+		    'content-type'    => 'application/json'
+		);
+
+		push @$requests, $req;
+	    }
+	}
+    }
+
+    return $requests;
+}
+
+# users, groups CHANGE
+sub requests_generator_change
+{
+    return requests_generator_common(@_, 'PATCH', "https://www.googleapis.com/admin/directory/v1/{scope}/{requestobjectid}");
+}
+
+# users, groups REMOVE
+sub requests_generator_remove
+{
+    return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/{scope}/{requestobjectid}");
+}
+
+# users, groups ADD
+sub requests_generator_add
+{
+    return requests_generator_common(@_, 'POST', "https://www.googleapis.com/admin/directory/v1/{scope}");
+}
+
+# user photo CHANGE
+sub requests_generator_photo_change
+{
+    return requests_generator_common(@_, 'PATCH', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/{scope}/thumbnail");
+}
+
+# user photo REMOVE
+sub requests_generator_photo_remove
+{
+    return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/{scope}/thumbnail");
+}
+
+# user photo ADD
+sub requests_generator_photo_add
+{
+    return requests_generator_common(@_, 'PUT', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/{scope}/thumbnail");
+}
+
+# group member ADD
+sub requests_generator_add_member
+{
+    return requests_generator_common(@_, 'POST', "https://www.googleapis.com/admin/directory/v1/groups/{group}/members");
+}
+
+# group member REMOVE
+sub requests_generator_remove_member
+{
+    return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/groups/{group}/members/{member}");
+}
+
+sub requests_generator_common
+{
+    my ($data, $requested_ids, $action, $uri_str) = @_;
+
+    my $reqs = [];
+
+    foreach my $requestobjectid (keys %{$data})
+    {
+	if ((defined $requested_ids->{$requestobjectid}) && ($requested_ids->{$requestobjectid}))
+	{
+	    my $req = HTTP::Request->new($action, replace_id_to_data($uri_str, $data->{$requestobjectid}->{urldata}));
+	    $req->content(JSON->new->utf8->encode($data->{$requestobjectid}->{content})) if ($action ne 'DELETE');
+	    $req->header(
+		# TODO: add MAP: all {header} and authorization and content-type
+		'requestobjectid' => $requestobjectid,
+		'requestarrayids' => $data->{$requestobjectid}->{header}->{requestarrayids},
+		'expectnewid'     => $data->{$requestobjectid}->{header}->{expectnewid},
+		'debuginfo'       => $data->{$requestobjectid}->{header}->{debuginfo},
+		'try'             => $requested_ids->{$requestobjectid},
+		'authorization'   => sprintf("Bearer %s", get_access_token()),
+		'content-type'    => 'application/json'
+	    );
+
+	    push @$reqs, $req;
+	}
+    }
+
+    return $reqs;
+}
+
+##############################################################################
+# CALLLBACKs for DIFF operation
+##############################################################################
+
+# add user or group (in APPS)
+sub callback_add
+{
+    debug(sprintf("Detected diff: ADD %s (%s) to APPS\n%s", $_[0], $_[5]->{OWNDIFF_IN}->{scope}, Dumper($_[2]->{$_[0]})), 'cyan', ($DEBUG > 3));
+    return callback_common(@_);
+}
+
+# change for users and groups (in APPS)
+sub callback_change
+{
+    debug(sprintf("Detected diff: CHANGE %s (%s) in APPS\n%s", $_[0], $_[5]->{OWNDIFF_IN}->{scope}, Dumper($_[2]->{$_[0]})), 'cyan', ($DEBUG > 3));
+    return callback_common(@_);
+}
+
+# remove user or group from the group (in APPS)
+sub callback_remove
+{
+    debug(sprintf("Detected diff: REMOVE %s (%s) from APPS\n%s", $_[0], $_[5]->{OWNDIFF_IN}->{scope}, Dumper($_[1]->{$_[0]})), 'red', ($DEBUG > 3));
+    return callback_common(@_);
+}
+
+# common callback for user and group (not group members) operations
+sub callback_common
+{
+    my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_;
+
+    my $evaluation = {
+	0 => {
+	    iprefix => "SIMULATION ONLY: ",
+	    process => 0,
+	    color   => ($operation eq 'DISCARD_A') ? 'red' : 'cyan',
+	    show    => ($DEBUG > 0)
+	},
+	1 => {
+	    iprefix => "",
+	    process => 1,
+	    color   => 'white',
+	    show    => ($DEBUG > 1)
+	}
+    };
+
+    if (!$arguments->{CL}->{DEPTH})
+    {
+	debug(sprintf("%s%s", $evaluation->{$PROCESS}->{iprefix}, sprintf("Register modification: %s %s (%s) in APPS", $beautify_comp_debug->{$operation}, $pk, $arguments->{OWNDIFF_IN}->{scope})), $evaluation->{$PROCESS}->{color}, $evaluation->{$PROCESS}->{show});
+
+	if ($evaluation->{$PROCESS}->{process})
+	{
+	    if (($operation ne 'DISCARD_A') || ($REMOVEENABLE))
+	    {
+		debug(sprintf("FROM\n%sTO\n%s", Dumper($a->{$pk}), Dumper($b->{$pk})), 'cyan', ($DEBUG > 4));
+
+		my $requestobjectid = $pk; # default for ADD
+		$requestobjectid = $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{$pk} if (defined $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{$pk});
+	
+		# if (defined $arguments->{OWNDIFF_IN}->{source_for_patch}->{$arguments->{OWNDIFF_IN}->{scope}}); # for USERS
+		#$source_for_patch = patch_hash($source_for_patch, $arguments->{OWNDIFF_IN}->{apps_data_scope_part}->{$requestobjectid});
+		my $source_for_patch = patch_hash($arguments->{OWNDIFF_IN}->{source_for_patch}, $arguments->{OWNDIFF_IN}->{apps_data_scope_part}->{$requestobjectid});
+	
+		$arguments->{OWNDIFF_OUT}->{$operation}->{$requestobjectid} = {
+		    content         => patch_hash($source_for_patch, $b->{$pk}),
+		    header          => {
+			requestarrayids => to_json([$requestobjectid, @{$arguments->{OWNDIFF_IN}->{arrayids}}, defined($arguments->{OWNDIFF_IN}->{arrayids_add_add_id}) ? $requestobjectid : ()], { utf8 => 1 }),
+			expectnewid     => ($operation eq "DISCARD_B") ? 1 : 0, # ADD new object with new APPS "ID"
+			debuginfo       => sprintf("operation: %s, group: %s, member: %s, scope: %s", $beautify_comp_debug->{$operation}, "", $pk, $arguments->{OWNDIFF_IN}->{scope}),
+		    },
+		    urldata         => {
+			scope           => $arguments->{OWNDIFF_IN}->{scope},
+			requestobjectid => $requestobjectid,
+		    },
+		};
+	    }
+	    else
+	    {
+		debug(sprintf("%s operations are disabled", $beautify_comp_debug->{$operation}), 'yellow', $evaluation->{$PROCESS}->{show});
+	    }
+	}
+    }
+}
+
+# add member to the group (in APPS)
+sub callback_member_add
+{
+    callback_member_common(@_);
+}
+
+# remove member from the group (in APPS)
+sub callback_member_remove
+{
+    callback_member_common(@_);
+}
+
+# common callback for group member operatons (in APPS)
+sub callback_member_common
+{
+    my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_;
+
+    if ($arguments->{CL}->{DEPTH} == 2)
+    {
+	my $primary_information = sprintf("Detected diff: %s group member %s %s (%s) %s in APPS (%s)", $beautify_comp_debug->{$operation}, $pk, ($operation eq 'DISCARD_A') ? "FROM" : "TO", $arguments->{CL}->{REFER_ARRAY}[1], $arguments->{CL}->{REFER_ARRAY}[0], $arguments->{OWNDIFF_IN}->{scope});
+
+	if ($PROCESS)
+	{
+	    debug($primary_information, ($operation eq 'DISCARD_A') ? 'yellow' : 'cyan', ($DEBUG > 2));
+
+	    if (defined (my $groupid = $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{groups}->{$arguments->{CL}->{REFER_ARRAY}[0]}))
+	    {
+		my $memberid = undef;
+
+		if ($operation eq 'DISCARD_B') # for ADD is undefined conversion OK
+		{
+		    $memberid = $pk;
+		}
+		elsif (defined $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{members}->{$pk})
+		{
+		    $memberid = $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{members}->{$pk}
+		}
+
+		if (defined $memberid)
+		{
+		    my $structured_key = to_json([$memberid, 'hash', $groupid], { utf8 => 1 });
+		    $arguments->{OWNDIFF_OUT}->{$operation}->{$structured_key} =
+		    {
+			content         => {
+			    email           => $pk,
+			    role            => "MEMBER",
+			},
+			header          => {
+			    requestarrayids => $structured_key,
+			    expectnewid     => 0,
+			    debuginfo       => sprintf("Operation: %s, group: %s, member: %s, scope: %s", $beautify_comp_debug->{$operation}, $arguments->{CL}->{REFER_ARRAY}[0], $pk, $arguments->{OWNDIFF_IN}->{scope}),
+			},
+			urldata         => {
+			    group           => $groupid,
+			    member          => $memberid,
+			},
+		    };
+		}
+		else
+		{ # problem if operation <> ADD (DISCARD_B)
+		    debug(sprintf("Undefined conversion between ids in callback (memberid %s, operation %s). Check it!", $pk, $operation), 'red');
+		}
+	    }
+	    else
+	    {
+		debug(sprintf("Undefined conversion between ids in callback (groupid %s). Check it!", $arguments->{CL}->{REFER_ARRAY}[0]), 'red');
+	    }
+	}
+	else
+	{
+	    debug(sprintf("SIMULATION ONLY: %s", $primary_information), 'white', ($DEBUG > 0));
+	}
+    }
+}
+
+##############################################################################
+# TRAVERSE functions (make diff, make requests and run parallel)
+##############################################################################
+sub traverse
+{
+    my ($scope, $apps_data, $diff) = @_;
+
+    my $requests_generators = {
+	users => {
+	    CHANGE    => \&requests_generator_change,        # change
+	    DISCARD_A => \&requests_generator_remove,        # remove
+	    DISCARD_B => \&requests_generator_add,           # add
+	},
+	groups => {
+	    CHANGE    => \&requests_generator_change,        # change
+	    DISCARD_A => \&requests_generator_remove,        # remove
+	    DISCARD_B => \&requests_generator_add,           # add
+	},
+	photos => {
+	    CHANGE    => \&requests_generator_photo_change,  # change
+	    DISCARD_A => \&requests_generator_photo_remove,  # remove
+	    DISCARD_B => \&requests_generator_photo_add,     # add
+	},
+	members => {
+	    DISCARD_A => \&requests_generator_remove_member, # remove
+	    DISCARD_B => \&requests_generator_add_member,    # add
+	},
+    };
+
+    foreach my $operation (sort keys %{$diff}) # CHANGE, DISCARD_A/remove, DISCARD_B/add (remove first and run add)
+    {
+	if (defined($requests_generators->{$scope}->{$operation}))
+	{ # only if exists request generator
+	    debug(sprintf("Run prepared requests parallel for %s and operation %s", uc($scope), $beautify_comp_debug->{$operation}), 'white', ($DEBUG > 2));
+	
+	    my %ids = map { $_ => { try => 1, success => 0 } } keys %{$diff->{$operation}};
+	    my $process_status = process_parallel(\&{$requests_generators->{$scope}->{$operation}}, $diff->{$operation}, \%ids);
+	    foreach my $requestobjectid (keys %{$diff->{$operation}})
+	    {
+		my $appsid = $process_status->{$requestobjectid}->{appsid};
+		if ($process_status->{$requestobjectid}->{success})
+		{
+		    debug(sprintf("%s response: %s", $operation, Dumper($process_status->{$requestobjectid})), 'green', ($DEBUG >4));
+		    debug(sprintf("Parallel proces response: OK: %s for %s, %s, %s", $beautify_comp_debug->{$operation}, uc($scope), $appsid->[0], $appsid->[2]), 'green', ($DEBUG > 1));
+
+		    if (defined $process_status->{$requestobjectid}->{content})
+		    {
+			debug(sprintf("Add new content to cache \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 4));
+			$apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]} = $process_status->{$requestobjectid}->{content};
+		    }
+		    else
+		    {
+			debug(sprintf("Delete cache structure part \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 4));
+			delete($apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]});
+		    }
+		}
+		else
+		{
+		    debug(sprintf("Parallel proces response: ERROR: %s for %s, %s, %s", $beautify_comp_debug->{$operation}, uc($scope), defined($appsid->[0]) ? $appsid->[0] : "N/A", defined($appsid->[2]) ? $appsid->[2] : "N/A"), 'red');
+		}
+	    }
+	}
+	else
+	{
+	    debug(sprintf("Request generator for %s and operation %s not defined", uc($scope), $beautify_comp_debug->{$operation}), 'yellow');
+	}
+    }
+}
+
+sub get_group_ids_ref
+{
+    my ($apps_data) = @_;
+
+    my @ids = keys %{$apps_data->{apps}->{groups}->{1}->{hash}};
+
+    return \@ids;
+}
+
+sub get_users_ids_ref
+{
+    my ($apps_data) = @_;
+
+    my @ids = keys %{$apps_data->{apps}->{users}->{1}->{hash}};
+
+    return \@ids;
+}
+
+sub get_single_member_undef_arr
+{
+    my @undef_array = (undef);
+
+    return \@undef_array;
+}
+
+##############################################################################
+# MAIN
+##############################################################################
+
+# argument processing
+GetOptions(
+    'debug|d=i'             => \$DEBUG,
+    'ldapusersflush|lfu'    => sub { $cachetime->{ldap}->{users}    = 0 },
+    'ldapgroupsflush|lfg'   => sub { $cachetime->{ldap}->{groups}   = 0 },
+    'ldapmembersflush|lfm'  => sub { $cachetime->{ldap}->{users}    = 0 ;
+                                     $cachetime->{ldap}->{groups}   = 0 },
+    'ldaporgunitsflush|lom' => sub { $cachetime->{ldap}->{orgunits} = 0 },
+    'ldapphotosflush|lfp'   => sub { $cachetime->{ldap}->{photos}   = 0 },
+    'appsusersflush|afu'    => sub { $cachetime->{apps}->{users}    = 0 },
+    'appsgroupsflush|afg'   => sub { $cachetime->{apps}->{groups}   = 0 },
+    'appsmembersflush|afm'  => sub { $cachetime->{apps}->{members}  = 0 },
+    'appsorgunitsflush|afo' => sub { $cachetime->{apps}->{orgunits} = 0 },
+    'appsphotosflush|afp'   => sub { $cachetime->{apps}->{photos}   = 0 },
+    'simulate|s'            => sub { $PROCESS                   = 0 },
+    'removeenable|r'        => sub { $REMOVEENABLE              = 1 },
+);
+
+# global data storage
+my %apps_data_storage = ();
+my $apps_data = \%apps_data_storage;
+
+monitoring2("Loading data from cache - per partes", ($DEBUG));
+$apps_data = load_scopes_from_cache_dir("cache");
+monitoring2("Loading data from cache - per partes", ($DEBUG));
+
+monitoring2("Retrieving data from LDAP", ($DEBUG));
+AD_get_all_data_from_ldap($apps_data, $cachetime->{ldap});
+monitoring2("Retrieving data from LDAP", ($DEBUG));
+
+monitoring2("Retrieving users from APPS domain", ($DEBUG));
+get_apps_data_single_scope_parallel($cachetime->{apps}->{users}, $apps_data, 'users', get_single_member_undef_arr(), 1);
+monitoring2("Retrieving users from APPS domain", ($DEBUG));
+
+monitoring2("Retrieving groups from APPS domain", ($DEBUG));
+get_apps_data_single_scope_parallel($cachetime->{apps}->{groups}, $apps_data, 'groups', get_single_member_undef_arr(), 1);
+monitoring2("Retrieving groups from APPS domain", ($DEBUG));
+
+monitoring2("Retrieving members in groups from APPS domain", ($DEBUG));
+get_apps_data_single_scope_parallel($cachetime->{apps}->{members}, $apps_data, 'members', get_group_ids_ref($apps_data), 0);
+monitoring2("Retrieving members in groups from APPS domain", ($DEBUG));
+
+monitoring2("Retrieving orgunits from APPS domain", ($DEBUG));
+#get_apps_data_single_scope_parallel($cachetime->{apps}->{orgunits}, $apps_data, 'orgunits', get_single_member_undef_arr(), 1);
+monitoring2("Retrieving orgunits from APPS domain", ($DEBUG));
+
+monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
+get_apps_data_single_scope_parallel($cachetime->{apps}->{photos}, $apps_data, 'photos', get_users_ids_ref($apps_data), 0);
+monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
+
+#if ($FLUSH)
+#{ # if refresh all data from google, then save cache immediate
+#    monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
+#    save_scopes_to_cache_dir($apps_data, "cache");
+#    monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
+#}
+
+monitoring2("Process users data by traverse", ($DEBUG));
+traverse('users', $apps_data, diff_users($apps_data));
+monitoring2("Process users data by traverse", ($DEBUG));
+
+monitoring2("Process groups data by traverse", ($DEBUG));
+traverse('groups', $apps_data, diff_groups($apps_data));
+monitoring2("Process groups data by traverse", ($DEBUG));
+
+monitoring2("Process group members data by traverse", ($DEBUG));
+traverse('members', $apps_data, diff_members($apps_data));
+monitoring2("Process group members data by traverse", ($DEBUG));
+
+monitoring2("Process photos data by traverse", ($DEBUG));
+traverse('photos', $apps_data, diff_photos($apps_data));
+monitoring2("Process photos data by traverse", ($DEBUG));
+
+monitoring2("Saving data to cache - per partes", ($DEBUG));
+save_scopes_to_cache_dir($apps_data, "cache");
+monitoring2("Saving data to cache - per partes", ($DEBUG));
+
+##############################################################################
+# END
+##############################################################################
