@@ -1006,7 +1006,7 @@ sub process_parallel
 			}
 			else
 			{
-			    debug(sprintf("ERROR answer for %s (%s) was %s : %s", $api_response->request->url, $requestobjectid, $api_response->code, $api_response->message), 'red');
+			    debug(sprintf("ERROR answer for %s (%s) was %s : %s", $api_response->request->url, $requestobjectid, $api_response->code, $api_response->message), 'yellow');
 			    $ids->{$requestobjectid}->{try}++;
 			}
 		    }
@@ -1207,7 +1207,7 @@ sub callback_common
 	{
 	    if (($operation ne 'DISCARD_A') || ($REMOVEENABLE))
 	    {
-		debug(sprintf("FROM\n%sTO\n%s", Dumper($a->{$pk}), Dumper($b->{$pk})), 'cyan', ($DEBUG > 4));
+		debug(sprintf("FROM\n%sTO\n%s", Dumper($a->{$pk}), Dumper($b->{$pk})), 'cyan', ($DEBUG > 3));
 
 		my $requestobjectid = $pk; # default for ADD
 		$requestobjectid = $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{$pk} if (defined $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{$pk});
