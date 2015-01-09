@@ -1452,12 +1452,12 @@ monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
 get_apps_data_single_scope_parallel($cachetime->{apps}->{photos}, $apps_data, 'photos', get_users_ids_ref($apps_data), 0);
 monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
 
-#if ($FLUSH)
-#{ # if refresh all data from google, then save cache immediate
-#    monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
-#    save_scopes_to_cache_dir($apps_data, "cache");
-#    monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
-#}
+if (scalar(map {$_ ? () : $_} values %{$cachetime->{apps}}))
+{ # if refresh data from Google APPS, then save cache immediate
+    monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
+    save_scopes_to_cache_dir($apps_data, "cache");
+    monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
+}
 
 monitoring2("Process users data by traverse", ($DEBUG));
 traverse('users', $apps_data, diff_users($apps_data));
