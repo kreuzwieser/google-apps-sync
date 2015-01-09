@@ -2,13 +2,13 @@ package GoogleAppSyncSettings;
 
 # Google APPS settings
 my $APPS_CONFIG = {
-    APPS_OAUTHCONF   => 'config/ouath2service.json',
-    APPS_DOMAIN      => 'mydomain.cz',
-    APPS_USER        => 'google-admin@mydomain.cz',
-    APPS_CUSTOMER    => 'C12345678',
-    APPS_MAXRESULTS  => 500,
-    APPS_TRY_MAX     => 5,
-    APPS_UD_OUP      => "/Organization", # default orgunit path for users
+    APPS_OAUTHCONF   => 'config/ouath2service.json',                # path to the oauth2 configuration and with private key string
+    APPS_DOMAIN      => 'mydomain.cz',                              # primary APPS domain
+    APPS_USER        => 'google-admin@mydomain.cz',                 # login with admin permission, all APPS admins are excluded from synchronization
+    APPS_CUSTOMER    => 'C12345678',                                # for orgunits synchronziation
+    APPS_MAXRESULTS  => 500,                                        # maximum is 500 object in single request response
+    APPS_TRY_MAX     => 5,                                          # maximum number of tries for each request
+    APPS_UD_OUP      => "/Organization",                            # default orgunit path for users
     APPS_UD_PASSHASH => "11aaaaaabbbbbbbbbbbbbbbbcccccccccccccc99", # default secret hash for users (SAML2 auth enabled)
 };
 
