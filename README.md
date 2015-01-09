@@ -15,17 +15,18 @@ Currently this script can do this:
  * synchronizing of group members (add, remove)
  * synchronizing of profile photos (add, change, remove)
 
-Currently not implemented:
-
-* synchronize of organizational units
-
-All datasets are cached for defined period in files.
+All datasets are cached for defined period in JSON files.
 
 The script requires a correctly filled attributes in Active Directory, especially mail, emplyeeID, gidNumber and for orgunits also attribute adminDescription.
 For more informations see source code.
 
 Installation
 ------------
+
+git clone https://github.com/kreuzwieser/google-apps-sync.git
+
+Configuration
+-------------
 
 1. change settings in file config/GoogleAppSyncSettings.pm
 2. create new service ID (as service): https://console.developers.google.com
