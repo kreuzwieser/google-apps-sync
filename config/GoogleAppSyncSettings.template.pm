@@ -25,7 +25,6 @@ my $LDAP_SEARCH = {
     DN   => {
 	users     => 'CN=ALL-USERS,OU=SYNC',
 	groups    => 'OU=ALL-ORGUNITS,OU=SYNC',
-	orgunits  => 'OU=ALL-ORGUNITS,OU=SYNC',
 	photos    => 'CN=ALL-USERS,OU=SYNC',
     },
     MEMBEROF_TREE_LIMIT => { # ignore memberOf which not match

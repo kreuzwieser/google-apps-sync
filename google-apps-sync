@@ -3,7 +3,6 @@
 # Tomas Kreuzwieser <kreuzwieser@ro.vutbr.cz>, 2014, 2015
 
 # TODO:
-# doplnit podporu pro orgunits
 # neukladat data cache co se nemenila
 # otestovat http://stackoverflow.com/questions/7809740/how-can-i-catch-a-failed-to-decode-json-error-message-in-perl na test spravnosti jsonu
 
@@ -33,7 +32,6 @@ use Caching qw(load_scopes_from_cache_dir save_scopes_to_cache_dir get_data_from
 use Diff;
 use MIME::Base64 qw(encode_base64 decode_base64 encode_base64url decode_base64url);
 use Encode qw(encode);
-#use MIME::Base64::URLSafe;
 use Try::Tiny;
 
 ##############################################################################
@@ -109,13 +107,11 @@ my $cachetime = {
         users    => 24 * 3600,
         groups   => 24 * 3600,
         members  => 7 * 24 * 3600,
-        orgunits => 7 * 24 * 3600,
         photos   => 7 * 24 * 3600,
     },
     ldap => {
 	users    => 24 * 3600,
 	groups   => 24 * 3600,
-	orgunits => 24 * 3600,
 	photos   => 24 * 3600,
     },
 };
@@ -502,15 +498,18 @@ sub get_apps_data_single_scope_parallel
 		{
 		    if (defined (my $content = $process_status->{$requestobjectid}->{content}))
 		    {
-			if (defined $content->{$scope}) # for users, groups, members
+			my $scope_in_apps = ($scope ne 'orgunits') ? $scope : 'organizationUnits';
+			my $id_in_apps = ($scope ne 'orgunits') ? 'id' : 'orgUnitPath';
+
+			if (defined $content->{$scope_in_apps}) # for users, groups, members
 			{
-			    if (ref($content->{$scope}) eq 'ARRAY')
+			    if (ref($content->{$scope_in_apps}) eq 'ARRAY')
 			    {
 				$data->{apps}->{$scope}->{$requestobjectid}->{hash} = {} if (!$objs_data->{$requestobjectid}->{page_counter});
 
-				foreach (@{$content->{$scope}})
+				foreach (@{$content->{$scope_in_apps}})
 				{
-				    $data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$_->{id}} = $_;
+				    $data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$_->{$id_in_apps}} = $_;
 				}
 			    }
 			}
@@ -710,9 +709,9 @@ sub diff_groups
     my $apps_ldapid_to_appsid = (); # conversion hash
 
     my $groups_apps = ();
-    foreach (keys %{$apps_data->{apps}->{groups}->{1}->{hash}})
+    foreach (keys %{$apps_data->{apps}->{$scope}->{1}->{hash}})
     {
-	if (defined (my $id = get_id_from_description($apps_data->{apps}->{groups}->{1}->{hash}->{$_}->{description})))
+	if (defined (my $id = get_id_from_description($apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{description})))
 	{
 	    $groups_apps->{$id} = {
 		email       => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{email},
@@ -774,7 +773,7 @@ sub diff_members
 
     # prepare APPS site group members structure
     my $apps_structgroups = ();
-    foreach my $groupid (keys %{$apps_data->{apps}->{members}})
+    foreach my $groupid (keys %{$apps_data->{apps}->{$scope}})
     {
 	if (defined $apps_data->{apps}->{groups}->{1}->{hash}->{$groupid})
 	{ # only valid groups, not all from cache
@@ -783,18 +782,18 @@ sub diff_members
 		$apps_structgroups->{$group_email}->{groups} = {};
 		$apps_structgroups->{$group_email}->{users}  = {};
 
-		if (defined $apps_data->{apps}->{members}->{$groupid}->{hash})
+		if (defined $apps_data->{apps}->{$scope}->{$groupid}->{hash})
 		{
-		    foreach my $member (keys %{$apps_data->{apps}->{members}->{$groupid}->{hash}})
+		    foreach my $member (keys %{$apps_data->{apps}->{$scope}->{$groupid}->{hash}})
 		    {
-			if ((defined $apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{type}) && (defined $apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{email}))
+			if ((defined $apps_data->{apps}->{$scope}->{$groupid}->{hash}->{$member}->{type}) && (defined $apps_data->{apps}->{$scope}->{$groupid}->{hash}->{$member}->{email}))
 			{
-			    my $member_email = $apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{email};
-			    $apps_structgroups->{$group_email}->{users}->{$member_email}  = 1 if ($apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{type} eq "USER");
-			    $apps_structgroups->{$group_email}->{groups}->{$member_email} = 1 if ($apps_data->{apps}->{members}->{$groupid}->{hash}->{$member}->{type} eq "GROUP");
+			    my $member_email = $apps_data->{apps}->{$scope}->{$groupid}->{hash}->{$member}->{email};
+			    $apps_structgroups->{$group_email}->{users}->{$member_email}  = 1 if ($apps_data->{apps}->{$scope}->{$groupid}->{hash}->{$member}->{type} eq "USER");
+			    $apps_structgroups->{$group_email}->{groups}->{$member_email} = 1 if ($apps_data->{apps}->{$scope}->{$groupid}->{hash}->{$member}->{type} eq "GROUP");
 
 			    # generate conversion hash (for members)
-			    $apps_ldapid_to_appsid->{members}->{$member_email} = $member;
+			    $apps_ldapid_to_appsid->{$scope}->{$member_email} = $member;
 			}
 		    }
 		}
@@ -1046,7 +1045,6 @@ sub requests_generator_load
 	groups   => "https://www.googleapis.com/admin/directory/v1/{scope}?domain={domain}&maxResults={maxResults}&pageToken={pageToken}",
 	users    => "https://www.googleapis.com/admin/directory/v1/{scope}?domain={domain}&maxResults={maxResults}&pageToken={pageToken}",
 	members  => "https://www.googleapis.com/admin/directory/v1/groups/{object}/members?roles=MEMBER&maxResults={maxResults}&pageToken={pageToken}",
-	orgunits => "https://www.googleapis.com/admin/directory/v1/customer/{customer}/orgunits?type=all",
 	photos   => "https://www.googleapis.com/admin/directory/v1/users/{object}/{scope}/thumbnail",
     };
 
@@ -1417,12 +1415,10 @@ GetOptions(
     'ldapgroupsflush|lfg'   => sub { $cachetime->{ldap}->{groups}   = 0 },
     'ldapmembersflush|lfm'  => sub { $cachetime->{ldap}->{users}    = 0 ;
                                      $cachetime->{ldap}->{groups}   = 0 },
-    'ldaporgunitsflush|lom' => sub { $cachetime->{ldap}->{orgunits} = 0 },
     'ldapphotosflush|lfp'   => sub { $cachetime->{ldap}->{photos}   = 0 },
     'appsusersflush|afu'    => sub { $cachetime->{apps}->{users}    = 0 },
     'appsgroupsflush|afg'   => sub { $cachetime->{apps}->{groups}   = 0 },
     'appsmembersflush|afm'  => sub { $cachetime->{apps}->{members}  = 0 },
-    'appsorgunitsflush|afo' => sub { $cachetime->{apps}->{orgunits} = 0 },
     'appsphotosflush|afp'   => sub { $cachetime->{apps}->{photos}   = 0 },
     'simulate|s'            => sub { $PROCESS                   = 0 },
     'removeenable|r'        => sub { $REMOVEENABLE              = 1 },
@@ -1451,10 +1447,6 @@ monitoring2("Retrieving groups from APPS domain", ($DEBUG));
 monitoring2("Retrieving members in groups from APPS domain", ($DEBUG));
 get_apps_data_single_scope_parallel($cachetime->{apps}->{members}, $apps_data, 'members', get_group_ids_ref($apps_data), 0);
 monitoring2("Retrieving members in groups from APPS domain", ($DEBUG));
-
-monitoring2("Retrieving orgunits from APPS domain", ($DEBUG));
-#get_apps_data_single_scope_parallel($cachetime->{apps}->{orgunits}, $apps_data, 'orgunits', get_single_member_undef_arr(), 1);
-monitoring2("Retrieving orgunits from APPS domain", ($DEBUG));
 
 monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
 get_apps_data_single_scope_parallel($cachetime->{apps}->{photos}, $apps_data, 'photos', get_users_ids_ref($apps_data), 0);

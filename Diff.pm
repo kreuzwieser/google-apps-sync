@@ -3,6 +3,7 @@ package Diff;
 
 use strict;
 use Data::Dumper;
+use JSON;
 #use Data::Compare;
 #use Data::MessagePack;
 use Storable;
