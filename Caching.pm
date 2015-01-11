@@ -34,7 +34,7 @@ sub load_scopes_from_cache_dir
 	foreach my $scope (`ls -1 $dir/$part`)
 	{
 	    chomp $scope;
-	    if (($part eq "apps") && (($scope eq "members") || ($scope eq "photos")))
+	    if (($part eq "apps") && (($scope eq "members") || ($scope eq "photos") || ($scope eq "aliases")))
 	    {
 		foreach my $member (`ls -1 $dir/$part/$scope`)
 		{
@@ -61,7 +61,7 @@ sub save_scopes_to_cache_dir
     {
 	foreach my $scope (keys %{$apps_data->{$part}})
 	{
-	    if (($part eq "apps") && (($scope eq "members") || ($scope eq "photos")))
+	    if (($part eq "apps") && (($scope eq "members") || ($scope eq "photos")  || ($scope eq "aliases")))
 	    {
 		make_path("$dir/$part/$scope");
 		foreach my $member (keys %{$apps_data->{$part}->{$scope}})

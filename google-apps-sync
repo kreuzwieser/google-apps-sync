@@ -109,6 +109,7 @@ my $cachetime = {
         groups   => 24 * 3600,
         members  => 7 * 24 * 3600,
         photos   => 7 * 24 * 3600,
+        aliases  => 7 * 24 * 3600,
     },
     ldap => {
 	users    => 24 * 3600,
@@ -1047,6 +1048,7 @@ sub requests_generator_load
 	users    => "https://www.googleapis.com/admin/directory/v1/{scope}?domain={domain}&maxResults={maxResults}&pageToken={pageToken}",
 	members  => "https://www.googleapis.com/admin/directory/v1/groups/{object}/members?roles=MEMBER&maxResults={maxResults}&pageToken={pageToken}",
 	photos   => "https://www.googleapis.com/admin/directory/v1/users/{object}/{scope}/thumbnail",
+	aliases  => "https://www.googleapis.com/admin/directory/v1/users/{object}/aliases",
     };
 
     my $requests = [];
@@ -1109,6 +1111,18 @@ sub requests_generator_photo_remove
 sub requests_generator_photo_add
 {
     return requests_generator_common(@_, 'PUT', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/{scope}/thumbnail");
+}
+
+# user aliases REMOVE
+sub requests_aliases_photo_remove
+{
+    return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/aliases/{alias}");
+}
+
+# user aliases ADD
+sub requests_aliases_photo_add
+{
+    return requests_generator_common(@_, 'PUT', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/aliases");
 }
 
 # group member ADD
@@ -1320,23 +1334,27 @@ sub traverse
 
     my $requests_generators = {
 	users => {
-	    CHANGE    => \&requests_generator_change,        # change
-	    DISCARD_A => \&requests_generator_remove,        # remove
-	    DISCARD_B => \&requests_generator_add,           # add
+	    CHANGE    => \&requests_generator_change,         # change
+	    DISCARD_A => \&requests_generator_remove,         # remove
+	    DISCARD_B => \&requests_generator_add,            # add
 	},
 	groups => {
-	    CHANGE    => \&requests_generator_change,        # change
-	    DISCARD_A => \&requests_generator_remove,        # remove
-	    DISCARD_B => \&requests_generator_add,           # add
+	    CHANGE    => \&requests_generator_change,         # change
+	    DISCARD_A => \&requests_generator_remove,         # remove
+	    DISCARD_B => \&requests_generator_add,            # add
 	},
 	photos => {
-	    CHANGE    => \&requests_generator_photo_change,  # change
-	    DISCARD_A => \&requests_generator_photo_remove,  # remove
-	    DISCARD_B => \&requests_generator_photo_add,     # add
+	    CHANGE    => \&requests_generator_photo_change,   # change
+	    DISCARD_A => \&requests_generator_photo_remove,   # remove
+	    DISCARD_B => \&requests_generator_photo_add,      # add
+	},
+	aliases => {
+	    DISCARD_A => \&requests_generator_aliases_remove, # remove
+	    DISCARD_B => \&requests_generator_aliases_add,    # add
 	},
 	members => {
-	    DISCARD_A => \&requests_generator_remove_member, # remove
-	    DISCARD_B => \&requests_generator_add_member,    # add
+	    DISCARD_A => \&requests_generator_remove_member,  # remove
+	    DISCARD_B => \&requests_generator_add_member,     # add
 	},
     };
 
@@ -1417,10 +1435,13 @@ GetOptions(
     'ldapmembersflush|lfm'  => sub { $cachetime->{ldap}->{users}    = 0 ;
                                      $cachetime->{ldap}->{groups}   = 0 },
     'ldapphotosflush|lfp'   => sub { $cachetime->{ldap}->{photos}   = 0 },
+
     'appsusersflush|afu'    => sub { $cachetime->{apps}->{users}    = 0 },
     'appsgroupsflush|afg'   => sub { $cachetime->{apps}->{groups}   = 0 },
     'appsmembersflush|afm'  => sub { $cachetime->{apps}->{members}  = 0 },
     'appsphotosflush|afp'   => sub { $cachetime->{apps}->{photos}   = 0 },
+    'appsaliasesflush|afa'  => sub { $cachetime->{apps}->{aliases}  = 0 },
+
     'simulate|s'            => sub { $PROCESS                   = 0 },
     'removeenable|r'        => sub { $REMOVEENABLE              = 1 },
 );
@@ -1459,6 +1480,10 @@ else
     monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
     get_apps_data_single_scope_parallel($cachetime->{apps}->{photos}, $apps_data, 'photos', get_users_ids_ref($apps_data), 0);
     monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
+
+    monitoring2("Retrieving user aliases from APPS domain", ($DEBUG));
+    get_apps_data_single_scope_parallel($cachetime->{apps}->{aliases}, $apps_data, 'aliases', get_users_ids_ref($apps_data), 0);
+    monitoring2("Retrieving user aliases from APPS domain", ($DEBUG));
 
     if (scalar(map {$_ ? () : $_} values %{$cachetime->{apps}}))
     { # if refresh data from Google APPS, then save cache immediate
