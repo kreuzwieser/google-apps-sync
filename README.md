@@ -14,6 +14,7 @@ Currently this script can do this:
  * synchronizing of groups (add, change, remove)
  * synchronizing of group members (add, remove)
  * synchronizing of profile photos (add, change, remove)
+ * synchronizing of user aliases (add, remove)
 
 All datasets are cached for defined period in JSON files.
 

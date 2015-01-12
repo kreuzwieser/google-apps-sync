@@ -105,16 +105,16 @@ my $beautify_comp_debug = {
 # flush cache for objects after this time [s]
 my $cachetime = {
     apps => {
-        users    => 24 * 3600,
-        groups   => 24 * 3600,
+        users    => 1 * 24 * 3600,
+        groups   => 1 * 24 * 3600,
         members  => 7 * 24 * 3600,
         photos   => 7 * 24 * 3600,
         aliases  => 7 * 24 * 3600,
     },
     ldap => {
-	users    => 24 * 3600,
-	groups   => 24 * 3600,
-	photos   => 24 * 3600,
+	users    => 4 * 3600,
+	groups   => 4 * 3600,
+	photos   => 4 * 3600,
     },
 };
 
@@ -465,6 +465,22 @@ sub get_apps_data_single_scope_parallel
     my $objs_data      = ();
     my $objs_nicache   = ();
 
+    my $hashname_in_apps = {
+	users                   => 'users',
+	groups                  => 'groups',
+	members                 => 'members',
+	orgunits                => 'organizationUnits',
+	aliases                 => 'aliases',
+    };
+
+    my $id_name_in_apps = {
+	users                   => 'id',
+	groups                  => 'id',
+	members                 => 'id',
+	orgunits                => 'orgUnitPath',
+	aliases                 => 'alias',
+    };
+
     foreach my $requestobjectid (@$objs)
     {
 	$requestobjectid = 1 if (!defined $requestobjectid);
@@ -500,8 +516,7 @@ sub get_apps_data_single_scope_parallel
 		{
 		    if (defined (my $content = $process_status->{$requestobjectid}->{content}))
 		    {
-			my $scope_in_apps = ($scope ne 'orgunits') ? $scope : 'organizationUnits';
-			my $id_in_apps = ($scope ne 'orgunits') ? 'id' : 'orgUnitPath';
+			my $scope_in_apps = $hashname_in_apps->{$scope};
 
 			if (defined $content->{$scope_in_apps}) # for users, groups, members
 			{
@@ -510,14 +525,17 @@ sub get_apps_data_single_scope_parallel
 				$data->{apps}->{$scope}->{$requestobjectid}->{hash} = {} if (!$objs_data->{$requestobjectid}->{page_counter});
 
 				foreach (@{$content->{$scope_in_apps}})
-				{
-				    $data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$_->{$id_in_apps}} = $_;
+				{ # transform array to hash
+				    $data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$_->{$id_name_in_apps->{$scope}}} = $_;
 				}
 			    }
 			}
 			else # for photos
 			{
-			    $data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$requestobjectid} = $content;
+			    if ($scope eq 'photos')
+			    {
+				$data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$requestobjectid} = $content;
+			    }
 			}
 
 			if (defined $content->{nextPageToken})
@@ -885,7 +903,7 @@ sub diff_photos
     my $scope = 'photos';
     my $apps_ldapid_to_appsid = (); # conversion hash
 
-    my $photos_apps = ();
+    my $apps = ();
     foreach (keys %{$apps_data->{apps}->{$scope}})
     {
 	if (defined (my $id = get_id_from_externalIds_etc($apps_data->{apps}->{users}->{1}->{hash}->{$_})))
@@ -897,7 +915,7 @@ sub diff_photos
 		{ # the '==' and '=' sequence indicate that the last group contained only 8 or 16 bits, respectively
 		    $photodata = $1;
 		}
-		$photos_apps->{$id} = {
+		$apps->{$id} = {
 		    photoData => $photodata,
 		};
 	    }
@@ -906,14 +924,14 @@ sub diff_photos
 	}
     }
 
-    my $photos_ldap = ();
+    my $ldap = ();
     foreach (keys %{$apps_data->{ldap}->{$scope}->{data}->{byID}})
     {
 	if (defined $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{thumbnailPhoto})
 	{
 	    if (defined (my $id = $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}))
 	    {
-		$photos_ldap->{$apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}} = {
+		$ldap->{$id} = {
 		    photoData => $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{thumbnailPhoto},
 		};
 	    }
@@ -934,12 +952,84 @@ sub diff_photos
     };
 
     # compare APPS and LDAP user photos structures
-    Diff::compare_and_process($photos_apps, $photos_ldap,
+    Diff::compare_and_process($apps, $ldap,
 	{
 	    MATCH     => sub {},
 	    DISCARD_A => \&callback_remove,
 	    DISCARD_B => \&callback_add,
 	    CHANGE    => \&callback_change,
+	},
+	undef,
+	$arguments,
+    );
+
+    return $arguments->{OWNDIFF_OUT};
+}
+
+sub diff_aliases
+{
+    my ($apps_data) = @_;
+
+    my $scope = 'aliases';
+    my $apps_ldapid_to_appsid = (); # conversion hash
+
+    my $apps = ();
+    foreach (keys %{$apps_data->{apps}->{$scope}})
+    {
+	if (defined ($apps_data->{apps}->{users}->{1}->{hash}->{$_}))
+	{
+	    if (defined (my $id = get_id_from_externalIds_etc($apps_data->{apps}->{users}->{1}->{hash}->{$_})))
+	    {
+		$apps->{$id}->{users} = {};
+		foreach my $aliasid (keys %{$apps_data->{apps}->{$scope}->{$_}->{hash}})
+		{
+		    $apps->{$id}->{users}->{$aliasid} = 1;
+		}
+
+		# generate conversion hash
+		$apps_ldapid_to_appsid->{$id} = $_;
+	    }
+	}
+    }
+
+    my $ldap = ();
+    foreach (keys %{$apps_data->{ldap}->{users}->{data}->{byID}})
+    {
+	if (defined (my $id = $apps_data->{ldap}->{users}->{data}->{byID}->{$_}->{employeeID}))
+	{
+	    if (defined $apps->{$id}->{users}) # only for IDs in APPS
+	    { # no aliases at this moment
+		$ldap->{$id}->{users} = {};
+
+		my $alias = sprintf("%s%s%s", $id, '@', $APPS_CONFIG->{APPS_DOMAIN});
+		if ($alias ne $apps_data->{ldap}->{users}->{data}->{byID}->{$_}->{userPrincipalName})
+		{
+		    $ldap->{$id}->{users}->{$alias} = 1;
+		}
+	    }
+	}
+    }
+
+    my $arguments = {
+	    MAX_DEPTH   => 2,
+	    OWNDIFF_OUT => undef,
+	    OWNDIFF_IN  => {
+		scope                 => $scope,
+		apps_data_scope_part  => $apps_data->{apps}->{$scope},
+		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
+		arrayids              => ['hash'],
+		arrayids_add_add_id   => 1,
+		source_for_patch      => undef,
+	    },
+    };
+
+    # compare APPS and LDAP user photos structures
+    Diff::compare_and_process($apps, $ldap,
+	{
+	    MATCH     => sub {},
+	    DISCARD_A => \&callback_alias_remove,
+	    DISCARD_B => \&callback_alias_add,
+	    CHANGE    => \&callback_alias_change,
 	},
 	undef,
 	$arguments,
@@ -1077,6 +1167,12 @@ sub requests_generator_load
     return $requests;
 }
 
+# users, groups ADD
+sub requests_generator_add
+{
+    return requests_generator_common(@_, 'POST', "https://www.googleapis.com/admin/directory/v1/{scope}");
+}
+
 # users, groups CHANGE
 sub requests_generator_change
 {
@@ -1089,10 +1185,10 @@ sub requests_generator_remove
     return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/{scope}/{requestobjectid}");
 }
 
-# users, groups ADD
-sub requests_generator_add
+# user photo ADD
+sub requests_generator_photo_add
 {
-    return requests_generator_common(@_, 'POST', "https://www.googleapis.com/admin/directory/v1/{scope}");
+    return requests_generator_common(@_, 'PUT', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/{scope}/thumbnail");
 }
 
 # user photo CHANGE
@@ -1107,24 +1203,6 @@ sub requests_generator_photo_remove
     return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/{scope}/thumbnail");
 }
 
-# user photo ADD
-sub requests_generator_photo_add
-{
-    return requests_generator_common(@_, 'PUT', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/{scope}/thumbnail");
-}
-
-# user aliases REMOVE
-sub requests_aliases_photo_remove
-{
-    return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/aliases/{alias}");
-}
-
-# user aliases ADD
-sub requests_aliases_photo_add
-{
-    return requests_generator_common(@_, 'PUT', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/aliases");
-}
-
 # group member ADD
 sub requests_generator_add_member
 {
@@ -1135,6 +1213,18 @@ sub requests_generator_add_member
 sub requests_generator_remove_member
 {
     return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/groups/{group}/members/{member}");
+}
+
+# user aliases ADD
+sub requests_generator_add_alias
+{
+    return requests_generator_common(@_, 'POST', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/aliases");
+}
+
+# user aliases REMOVE
+sub requests_generator_remove_alias
+{
+    return requests_generator_common(@_, 'DELETE', "https://www.googleapis.com/admin/directory/v1/users/{requestobjectid}/aliases/{alias}");
 }
 
 sub requests_generator_common
@@ -1192,7 +1282,7 @@ sub callback_remove
     return callback_common(@_);
 }
 
-# common callback for user and group (not group members) operations
+# common callback for user and group (not group members and aliases) operations
 sub callback_common
 {
     my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_;
@@ -1212,7 +1302,8 @@ sub callback_common
 	}
     };
 
-    if (!$arguments->{CL}->{DEPTH})
+    #if (!$arguments->{CL}->{DEPTH})
+    if ($arguments->{CL}->{DEPTH} == $arguments->{MAX_DEPTH})
     {
 	debug(sprintf("%s%s", $evaluation->{$PROCESS}->{iprefix}, sprintf("Register modification: %s %s (%s) in APPS", $beautify_comp_debug->{$operation}, $pk, $arguments->{OWNDIFF_IN}->{scope})), $evaluation->{$PROCESS}->{color}, $evaluation->{$PROCESS}->{show});
 
@@ -1267,7 +1358,8 @@ sub callback_member_common
 {
     my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_;
 
-    if ($arguments->{CL}->{DEPTH} == 2)
+    #if ($arguments->{CL}->{DEPTH} == 2)
+    if ($arguments->{CL}->{DEPTH} == $arguments->{MAX_DEPTH})
     {
 	my $primary_information = sprintf("Detected diff: %s group member %s %s (%s) %s in APPS (%s)", $beautify_comp_debug->{$operation}, $pk, ($operation eq 'DISCARD_A') ? "FROM" : "TO", $arguments->{CL}->{REFER_ARRAY}[1], $arguments->{CL}->{REFER_ARRAY}[0], $arguments->{OWNDIFF_IN}->{scope});
 
@@ -1325,6 +1417,64 @@ sub callback_member_common
     }
 }
 
+# add alias to the user (in APPS)
+sub callback_alias_add
+{
+    return callback_alias_common(@_);
+}
+
+# remove alias from the user (in APPS)
+sub callback_alias_remove
+{
+    return callback_alias_common(@_);
+}
+
+# common callback for alias operatons (in APPS)
+sub callback_alias_common
+{
+    my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_;
+
+    #if ($arguments->{CL}->{DEPTH} == 2)
+    if ($arguments->{CL}->{DEPTH} == $arguments->{MAX_DEPTH})
+    {
+	my $primary_information = sprintf("Detected diff: %s alias %s %s (%s) %s in APPS (%s)", $beautify_comp_debug->{$operation}, $pk, ($operation eq 'DISCARD_A') ? "FROM" : "TO", $arguments->{CL}->{REFER_ARRAY}[1], $arguments->{CL}->{REFER_ARRAY}[0], $arguments->{OWNDIFF_IN}->{scope});
+
+	if ($PROCESS)
+	{
+	    debug($primary_information, ($operation eq 'DISCARD_A') ? 'yellow' : 'cyan', ($DEBUG > 2));
+
+	    if (defined (my $userid = $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{$arguments->{CL}->{REFER_ARRAY}[0]}))
+	    {
+		my $structured_key = to_json([$pk, 'hash', $userid], { utf8 => 1 });
+		$arguments->{OWNDIFF_OUT}->{$operation}->{$structured_key} =
+		{
+		    content         => {
+			alias           => $pk,
+		    },
+		    header          => {
+			requestarrayids => $structured_key,
+			expectnewid     => 0,
+			debuginfo       => sprintf("Operation: %s, user: %s, alias: %s, scope: %s", $beautify_comp_debug->{$operation}, $arguments->{CL}->{REFER_ARRAY}[0], $pk, $arguments->{OWNDIFF_IN}->{scope}),
+		    },
+		    urldata         => {
+			requestobjectid => $userid,
+			alias           => $pk,
+		    },
+		};
+	    }
+	    else
+	    {
+		debug(sprintf("Undefined conversion between ids in callback (groupid %s). Check it!", $arguments->{CL}->{REFER_ARRAY}[0]), 'red');
+	    }
+	}
+	else
+	{
+	    debug(sprintf("SIMULATION ONLY: %s", $primary_information), 'white', ($DEBUG > 0));
+	}
+    }
+}
+
+
 ##############################################################################
 # TRAVERSE functions (make diff, make requests and run parallel)
 ##############################################################################
@@ -1348,13 +1498,13 @@ sub traverse
 	    DISCARD_A => \&requests_generator_photo_remove,   # remove
 	    DISCARD_B => \&requests_generator_photo_add,      # add
 	},
-	aliases => {
-	    DISCARD_A => \&requests_generator_aliases_remove, # remove
-	    DISCARD_B => \&requests_generator_aliases_add,    # add
-	},
 	members => {
 	    DISCARD_A => \&requests_generator_remove_member,  # remove
 	    DISCARD_B => \&requests_generator_add_member,     # add
+	},
+	aliases => {
+	    DISCARD_A => \&requests_generator_remove_alias,   # remove
+	    DISCARD_B => \&requests_generator_add_alias,      # add
 	},
     };
 
@@ -1415,6 +1565,20 @@ sub get_users_ids_ref
 
     return \@ids;
 }
+
+#sub get_users_ids_ref_t1
+#{
+#    my ($apps_data) = @_;
+#
+#    my @ids = ("106210363980832267128");
+#    foreach (`ls -1 /home/google-sync/google-apps-sync/cache/apps/photos | head -n 1000`)
+#    {
+#	chomp;
+#	push @ids, $_;
+#    }
+#
+#    return \@ids;
+#}
 
 sub get_single_member_undef_arr
 {
@@ -1507,6 +1671,10 @@ else
     monitoring2("Process photos data by traverse", ($DEBUG));
     traverse('photos', $apps_data, diff_photos($apps_data));
     monitoring2("Process photos data by traverse", ($DEBUG));
+
+    monitoring2("Process user aliases data by traverse", ($DEBUG));
+    traverse('aliases', $apps_data, diff_aliases($apps_data));
+    monitoring2("Process user aliases data by traverse", ($DEBUG));
 
     monitoring2("Saving data to cache - per partes", ($DEBUG));
     save_scopes_to_cache_dir($apps_data, "cache");
