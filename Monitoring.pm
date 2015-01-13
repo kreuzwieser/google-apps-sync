@@ -18,10 +18,10 @@ sub monitoring2
     my ($message) = @_;
 
     my ($seconds, $microseconds) = gettimeofday();
-    if (defined $monitoring->{$message})
+    if ((defined $monitoring) && (defined $monitoring->{$message}))
     {
 	my $stime = ($seconds - $monitoring->{$message}->{seconds}) * 1000000 + $microseconds - $monitoring->{$message}->{microseconds};
-	debug(sprintf("%s...done (%d.%06d s)", $message, int($stime/1000000),$stime-int($stime/1000000)), 'yellow')
+	debug(sprintf("%s...done (%d.%06d s)", $message, int($stime/1000000), $stime - int($stime/1000000)), 'yellow')
     }
     else
     {
