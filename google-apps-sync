@@ -293,12 +293,13 @@ sub AD_get_data_from_ldap
     return $ad_data;
 }
 
-# load data from AD/LDAP (all scopes)
-sub AD_get_all_data_from_ldap
+# load new data from AD/LDAP (all scopes)
+sub AD_get_all_new_data_from_ldap
 {
     my ($apps_data, $cache_time) = @_;
 
     my $ldap = AD_Connect($LDAP_CONFIG->{LDAP_HOST}, $LDAP_CONFIG->{LDAP_USER}, $LDAP_CONFIG->{LDAP_PASSWORD});
+    my $start_ldap = time;
 
     foreach my $searchtype (keys %{$LDAP_SEARCH->{DN}})
     {
@@ -313,6 +314,8 @@ sub AD_get_all_data_from_ldap
 	    debug("Ldap data for $searchtype already cached", 'white', ($DEBUG > 4));
 	}
     }
+
+    save_scopes_to_cache_dir($apps_data, $start_ldap);
 
     # odpojeni od AD
     AD_Close($ldap);
@@ -766,7 +769,7 @@ sub diff_groups
 		apps_data_scope_part  => $apps_data->{apps}->{$scope}->{1}->{hash},
 		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
 		arrayids              => ['hash', 1],
-		source_for_patch      => undef,
+		source_for_patch      => {},
 	    },
     };
 
@@ -877,7 +880,7 @@ sub diff_members
 		apps_data_scope_part  => $apps_data->{apps}->{$scope},
 		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
 		arrayids              => ['hash', 1],
-		source_for_patch      => undef,
+		source_for_patch      => {},
 	    },
     };
 
@@ -947,7 +950,7 @@ sub diff_photos
 		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
 		arrayids              => ['hash'],
 		arrayids_add_add_id   => 1,
-		source_for_patch      => undef,
+		source_for_patch      => {},
 	    },
     };
 
@@ -1019,7 +1022,7 @@ sub diff_aliases
 		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
 		arrayids              => ['hash'],
 		arrayids_add_add_id   => 1,
-		source_for_patch      => undef,
+		source_for_patch      => {},
 	    },
     };
 
@@ -1318,7 +1321,9 @@ sub callback_common
 	
 		# if (defined $arguments->{OWNDIFF_IN}->{source_for_patch}->{$arguments->{OWNDIFF_IN}->{scope}}); # for USERS
 		#$source_for_patch = patch_hash($source_for_patch, $arguments->{OWNDIFF_IN}->{apps_data_scope_part}->{$requestobjectid});
+		#debug(sprintf("debug patch hash: S1: %s, S2: %s", Dumper($arguments->{OWNDIFF_IN}->{source_for_patch}), Dumper($arguments->{OWNDIFF_IN}->{apps_data_scope_part}->{$requestobjectid})), 'white');
 		my $source_for_patch = patch_hash($arguments->{OWNDIFF_IN}->{source_for_patch}, $arguments->{OWNDIFF_IN}->{apps_data_scope_part}->{$requestobjectid});
+		#debug(sprintf("debug patch hash: done"), 'white');
 	
 		$arguments->{OWNDIFF_OUT}->{$operation}->{$requestobjectid} = {
 		    content         => patch_hash($source_for_patch, $b->{$pk}),
@@ -1566,20 +1571,6 @@ sub get_users_ids_ref
     return \@ids;
 }
 
-#sub get_users_ids_ref_t1
-#{
-#    my ($apps_data) = @_;
-#
-#    my @ids = ("106210363980832267128");
-#    foreach (`ls -1 /home/google-sync/google-apps-sync/cache/apps/photos | head -n 1000`)
-#    {
-#	chomp;
-#	push @ids, $_;
-#    }
-#
-#    return \@ids;
-#}
-
 sub get_single_member_undef_arr
 {
     my @undef_array = (undef);
@@ -1590,6 +1581,8 @@ sub get_single_member_undef_arr
 ##############################################################################
 # MAIN
 ##############################################################################
+
+my $TS_START = time;
 
 # argument processing
 GetOptions(
@@ -1622,11 +1615,11 @@ else
     my $apps_data = \%apps_data_storage;
 
     monitoring2("Loading data from cache - per partes", ($DEBUG));
-    $apps_data = load_scopes_from_cache_dir("cache");
+    $apps_data = load_scopes_from_cache_dir();
     monitoring2("Loading data from cache - per partes", ($DEBUG));
 
     monitoring2("Retrieving data from LDAP", ($DEBUG));
-    AD_get_all_data_from_ldap($apps_data, $cachetime->{ldap});
+    AD_get_all_new_data_from_ldap($apps_data, $cachetime->{ldap});
     monitoring2("Retrieving data from LDAP", ($DEBUG));
 
     monitoring2("Retrieving users from APPS domain", ($DEBUG));
@@ -1652,7 +1645,7 @@ else
     if (scalar(map {$_ ? () : $_} values %{$cachetime->{apps}}))
     { # if refresh data from Google APPS, then save cache immediate
 	monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
-	save_scopes_to_cache_dir($apps_data, "cache");
+	save_scopes_to_cache_dir($apps_data, $TS_START);
 	monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
     }
 
@@ -1673,11 +1666,11 @@ else
     monitoring2("Process photos data by traverse", ($DEBUG));
 
     monitoring2("Process user aliases data by traverse", ($DEBUG));
-    traverse('aliases', $apps_data, diff_aliases($apps_data));
+#    traverse('aliases', $apps_data, diff_aliases($apps_data));
     monitoring2("Process user aliases data by traverse", ($DEBUG));
 
     monitoring2("Saving data to cache - per partes", ($DEBUG));
-    save_scopes_to_cache_dir($apps_data, "cache");
+    save_scopes_to_cache_dir($apps_data, $TS_START);
     monitoring2("Saving data to cache - per partes", ($DEBUG));
 }
 
