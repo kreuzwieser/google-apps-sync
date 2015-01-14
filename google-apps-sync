@@ -68,8 +68,8 @@ BEGIN {
 }
 
 # LWP::Parallet options
-use constant LWP_MAX_REQ      => 10;
-use constant LWP_TIMEOUT      => 3;
+use constant LWP_MAX_REQ      => 10; # max parallel requests
+use constant LWP_TIMEOUT      => 20; # in seconds
 
 ##############################################################################
 # Organization specified
