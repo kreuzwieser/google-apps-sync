@@ -1606,7 +1606,7 @@ sub traverse
 		}
 		else
 		{
-		    printf("%s\n", Dumper($process_status->{$requestobjectid}));
+		    #printf("%s\n", Dumper($process_status->{$requestobjectid}));
 		    debug(sprintf("Parallel proces response: ERROR: %s for %s, %s, %s", $beautify_comp_debug->{$operation}, uc($scope), defined($appsid->[0]) ? $appsid->[0] : "N/A", defined($appsid->[2]) ? $appsid->[2] : "N/A"), 'red');
 		}
 	    }
