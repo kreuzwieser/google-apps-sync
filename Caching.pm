@@ -7,8 +7,6 @@ use JSON;
 use File::Path qw(make_path);
 use parent qw/Exporter/;
 use Monitoring;
-#use Devel::Size qw(total_size);
-#use Digest::MD5 qw(md5 md5_hex md5_base64);
 
 our @EXPORT = qw/load_scopes_from_cache save_scopes_to_cache load_scopes_from_cache_dir save_scopes_to_cache_dir get_data_from_json_file/;
 
@@ -97,7 +95,7 @@ sub save_scopes_to_cache_dir
 		{
 		    if ($last >= $ts_start)
 		    {
-			#debug("Save $part->$scope to cache", 'white');
+			debug("Save $part->$scope to cache", 'white');
 			save_scopes_to_cache($apps_data->{$part}->{$scope}, "$CACHE_DIRECTORY/$part/$scope");
 		    }
 		}

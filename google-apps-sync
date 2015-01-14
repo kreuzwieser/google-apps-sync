@@ -35,7 +35,7 @@ use MIME::Base64 qw(encode_base64 decode_base64 encode_base64url decode_base64ur
 use Encode qw(encode);
 use Try::Tiny;
 use Proc::PID::File;
-use Devel::Size qw(total_size);
+#use Devel::Size qw(total_size);
 use Digest::MD5 qw(md5 md5_hex md5_base64);
 
 ##############################################################################
@@ -1574,25 +1574,31 @@ sub traverse
 		my $appsid = $process_status->{$requestobjectid}->{appsid};
 		if ($process_status->{$requestobjectid}->{success})
 		{
-		    debug(sprintf("%s response: %s", $operation, Dumper($process_status->{$requestobjectid})), 'green', ($DEBUG >4));
+		    debug(sprintf("%s response: %s", $operation, Dumper($process_status->{$requestobjectid})), 'green', ($DEBUG > 4));
 		    debug(sprintf("Parallel proces response: OK: %s for %s, %s, %s", $beautify_comp_debug->{$operation}, uc($scope), $appsid->[0], $appsid->[2]), 'green', ($DEBUG > 1));
 
-		    if ((defined $process_status->{$requestobjectid}) &&
-		        (defined $process_status->{$requestobjectid}->{content}))
+		    if ((defined $apps_data) &&
+			(defined $apps_data->{apps}) &&
+			(defined $apps_data->{apps}->{$scope}->{$appsid->[2]}) &&
+			(defined $apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}) &&
+			(defined $apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]}))
 		    {
-			debug(sprintf("Add new content to cache \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 4));
-			$apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]} = $process_status->{$requestobjectid}->{content};
+			if ((defined $process_status->{$requestobjectid}) && (defined $process_status->{$requestobjectid}->{content}))
+			{
+			    debug(sprintf("Add new content to cache \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 3));
+			    $apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]} = $process_status->{$requestobjectid}->{content};
+			    debug(sprintf("Add new last timestamp to cache \$apps_data->{apps}->{%s}->{last}", $scope, $appsid->[2]), 'green', ($DEBUG > 3));
+			    $apps_data->{apps}->{$scope}->{$appsid->[2]}->{last} = time;
+			}
+			else
+			{
+			    debug(sprintf("Delete cache structure part \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 3));
+			    delete($apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]});
+			}
 		    }
 		    else
 		    {
-			debug(sprintf("Delete cache structure part \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 4));
-			if ((defined $apps_data) &&
-			    (defined $apps_data->{apps}) &&
-			    (defined $apps_data->{apps}->{$scope}->{$appsid->[2]}) &&
-			    (defined $apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}))
-			{
-			    delete($apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]});
-			}
+			debug(sprintf("Undefined ID data in proces response, check it!"), 'red');
 		    }
 		}
 		else
@@ -1681,12 +1687,14 @@ else
     $apps_data = load_scopes_from_cache_dir();
     monitoring2("Loading data from cache - per partes", ($DEBUG));
 
+    # temporary for tests
     debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
     monitoring2("Retrieving data from LDAP", ($DEBUG));
     AD_get_all_new_data_from_ldap($apps_data, $cachetime->{ldap});
     monitoring2("Retrieving data from LDAP", ($DEBUG));
 
+    # temporary for tests
     debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
     monitoring2("Retrieving users from APPS domain", ($DEBUG));
@@ -1709,6 +1717,7 @@ else
     get_apps_data_single_scope_parallel($cachetime->{apps}->{aliases}, $apps_data, 'aliases', get_users_ids_ref($apps_data), 0);
     monitoring2("Retrieving user aliases from APPS domain", ($DEBUG));
 
+    # temporary for tests
     debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
     if (scalar(map {$_ ? () : $_} values %{$cachetime->{apps}}))
@@ -1735,9 +1744,10 @@ else
     monitoring2("Process photos data by traverse", ($DEBUG));
 
     monitoring2("Process user aliases data by traverse", ($DEBUG));
-    #traverse('aliases', $apps_data, diff_aliases($apps_data));
+    traverse('aliases', $apps_data, diff_aliases($apps_data));
     monitoring2("Process user aliases data by traverse", ($DEBUG));
 
+    # temporary for tests
     debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
     monitoring2("Saving data to cache - per partes", ($DEBUG));
