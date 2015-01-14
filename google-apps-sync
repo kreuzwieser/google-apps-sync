@@ -137,6 +137,22 @@ my $ldap_sumarize_config = {
 	},
 };
 
+my $apps_retr_config = {
+	users   => { priority => 1, ids_gen => \&get_undef_aref, refer => undef    },
+	groups  => { priority => 2, ids_gen => \&get_undef_aref, refer => undef    },
+	members => { priority => 3, ids_gen => \&get_ids_ref,    refer => 'groups' },
+	photos  => { priority => 4, ids_gen => \&get_ids_ref,    refer => 'users'  },
+	aliases => { priority => 5, ids_gen => \&get_ids_ref,    refer => 'users'  },
+};
+
+my $traverse_config = {
+	users   => { priority => 1 },
+	groups  => { priority => 2 },
+	members => { priority => 3 },
+	photos  => { priority => 4 },
+	aliases => { priority => 5 },
+};
+
 ##############################################################################
 # FUNCTIONS
 ##############################################################################
@@ -461,11 +477,12 @@ sub get_number_of_requests
 }
 
 # get data from Google APPS in parallel
-sub get_apps_data_single_scope_parallel
+sub get_apps_data_scope
 {
-    my ($cache_time, $data, $scope, $objs, $purge_all) = @_;
+    my ($data, $scope, $cache_time, $objs) = @_;
 
     my $iter_counter   = 0;
+    my $purge_all      = 0;
     my $objs_data      = ();
     my $objs_nicache   = ();
 
@@ -487,7 +504,12 @@ sub get_apps_data_single_scope_parallel
 
     foreach my $requestobjectid (@$objs)
     {
-	$requestobjectid = 1 if (!defined $requestobjectid);
+	if (!defined $requestobjectid)
+	{
+	    $requestobjectid = 1; # many object in single google apps request
+	    $purge_all       = 1; # purge all data at start
+	}
+	
 	if ((!defined $data->{apps}->{$scope}->{$requestobjectid}) || (!defined $data->{apps}->{$scope}->{$requestobjectid}->{last}) || (($data->{apps}->{$scope}->{$requestobjectid}->{last} < (time - $cache_time))))
 	{
 	    $objs_nicache->{$requestobjectid} = 1;
@@ -1078,6 +1100,21 @@ sub diff_aliases
     return $arguments->{OWNDIFF_OUT};
 }
 
+sub diff_caller
+{
+    my ($scope, $apps_data) = @_;
+
+    my $diff_functions = {
+	users   => \&diff_users,
+	groups  => \&diff_groups,
+	members => \&diff_members,
+	photos  => \&diff_photos,
+	aliases => \&diff_aliases,
+    };
+
+    return &{$diff_functions->{$scope}}($apps_data);
+}
+
 sub process_parallel
 {
     my ($requests_generator, $user_data, $ids) = @_;
@@ -1626,7 +1663,7 @@ sub get_ids_ref
     return \@ids;
 }
 
-sub get_single_member_undef_arr
+sub get_undef_aref
 {
     my @undef_array = (undef);
 
@@ -1665,7 +1702,7 @@ if (Proc::PID::File->running(dir=>"."))
 }
 else
 {
-    # global data storage
+    # global data storage with explicit declaration
     my %apps_data_storage = ();
     my $apps_data = \%apps_data_storage;
 
@@ -1674,71 +1711,36 @@ else
     monitoring2("Loading data from cache - per partes", ($DEBUG));
 
     # temporary for tests
-    debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
+    #debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
     monitoring2("Retrieving data from LDAP", ($DEBUG));
     AD_get_all_new_data_from_ldap($apps_data, $cachetime->{ldap}, \$TS_LAST_SAVE);
     monitoring2("Retrieving data from LDAP", ($DEBUG));
 
     # temporary for tests
-    debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
+    #debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
-    monitoring2("Retrieving users from APPS domain", ($DEBUG));
-    get_apps_data_single_scope_parallel($cachetime->{apps}->{users}, $apps_data, 'users', get_single_member_undef_arr(), 1);
-    monitoring2("Retrieving users from APPS domain", ($DEBUG));
-
-    monitoring2("Retrieving groups from APPS domain", ($DEBUG));
-    get_apps_data_single_scope_parallel($cachetime->{apps}->{groups}, $apps_data, 'groups', get_single_member_undef_arr(), 1);
-    monitoring2("Retrieving groups from APPS domain", ($DEBUG));
-
-    monitoring2("Retrieving group members from APPS domain", ($DEBUG));
-    get_apps_data_single_scope_parallel($cachetime->{apps}->{members}, $apps_data, 'members', get_ids_ref($apps_data, 'groups'), 0);
-    monitoring2("Retrieving group members from APPS domain", ($DEBUG));
-
-    monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
-    get_apps_data_single_scope_parallel($cachetime->{apps}->{photos}, $apps_data, 'photos', get_ids_ref($apps_data, 'users'), 0);
-    monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
-
-    monitoring2("Retrieving user aliases from APPS domain", ($DEBUG));
-    get_apps_data_single_scope_parallel($cachetime->{apps}->{aliases}, $apps_data, 'aliases', get_ids_ref($apps_data, 'users'), 0);
-    monitoring2("Retrieving user aliases from APPS domain", ($DEBUG));
-
-    # temporary for tests
-    debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
-
-    if (scalar(map {$_ ? () : $_} values %{$cachetime->{apps}}))
-    { # if refresh data from Google APPS, then save cache immediate
-	monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
+    foreach my $scope (sort { $apps_retr_config->{$a}->{priority} <=> $apps_retr_config->{$b}->{priority} } keys(%{$apps_retr_config}))
+    { # retrive uncached data from APPS
+	monitoring2("Retrieving $scope from APPS domain", ($DEBUG));
+	get_apps_data_scope($apps_data, $scope, $cachetime->{apps}->{$scope}, &{$apps_retr_config->{$scope}->{ids_gen}}($apps_data, $apps_retr_config->{$scope}->{refer}));
 	save_scopes_to_cache_dir($apps_data, \$TS_LAST_SAVE);
-	monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
+	monitoring2("Retrieving $scope from APPS domain", ($DEBUG));
     }
 
-    monitoring2("Process users data by traverse", ($DEBUG));
-    traverse('users', $apps_data, diff_users($apps_data));
-    monitoring2("Process users data by traverse", ($DEBUG));
+    # temporary for tests
+    #debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
-    monitoring2("Process groups data by traverse", ($DEBUG));
-    traverse('groups', $apps_data, diff_groups($apps_data));
-    monitoring2("Process groups data by traverse", ($DEBUG));
-
-    monitoring2("Process group members data by traverse", ($DEBUG));
-    traverse('members', $apps_data, diff_members($apps_data));
-    monitoring2("Process group members data by traverse", ($DEBUG));
-
-    monitoring2("Process photos data by traverse", ($DEBUG));
-    traverse('photos', $apps_data, diff_photos($apps_data));
-    monitoring2("Process photos data by traverse", ($DEBUG));
-
-    monitoring2("Process user aliases data by traverse", ($DEBUG));
-    traverse('aliases', $apps_data, diff_aliases($apps_data));
-    monitoring2("Process user aliases data by traverse", ($DEBUG));
+    foreach my $scope (sort { $traverse_config->{$a}->{priority} <=> $traverse_config->{$b}->{priority} } keys(%{$traverse_config}))
+    { # sync data between AD/LDAP and APPS
+	monitoring2("Process $scope data by traverse", ($DEBUG));
+	traverse($scope, $apps_data, diff_caller($scope, $apps_data));
+	save_scopes_to_cache_dir($apps_data, \$TS_LAST_SAVE);
+	monitoring2("Process $scope data by traverse", ($DEBUG));
+    }
 
     # temporary for tests
-    debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
-
-    monitoring2("Saving data to cache - per partes", ($DEBUG));
-    save_scopes_to_cache_dir($apps_data, \$TS_LAST_SAVE);
-    monitoring2("Saving data to cache - per partes", ($DEBUG));
+    #debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 }
 
 ##############################################################################

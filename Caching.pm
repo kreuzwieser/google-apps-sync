@@ -95,7 +95,7 @@ sub save_scopes_to_cache_dir
 		{
 		    if ($last >= ${$ts_start_ref})
 		    {
-			debug("Save $part->$scope to cache", 'white');
+			debug("Save $part -> $scope to cache", 'white');
 			save_scopes_to_cache($apps_data->{$part}->{$scope}, "$CACHE_DIRECTORY/$part/$scope");
 		    }
 		}
