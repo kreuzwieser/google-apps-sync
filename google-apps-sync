@@ -1098,57 +1098,59 @@ sub process_parallel
 	    foreach my $entid (keys %$entries)
 	    {
 		my $api_response = $entries->{$entid}->response;
-		if (((defined $api_response) &&
-		     (defined $api_response->{_request}) &&
-		     (defined $api_response->{_request}->{_headers}) &&
-		     (defined $api_response->{_request}->{_headers}->{requestobjectid})) &&
-		     (defined (my $requestobjectid = $api_response->{_request}->{_headers}->{requestobjectid})))
+		if ((defined $api_response) &&
+		    (defined (my $request = $api_response->{_request})) &&
+		    (defined (my $headers = $api_response->{_request}->{_headers})) &&
+		    (defined (my $requestobjectid = $api_response->{_request}->{_headers}->{requestobjectid})))
 		{ # check all levels for avoid autovivification
+		    $ids->{$requestobjectid}->{appsid}   = decode_json($headers->{requestarrayids}) if (defined $headers->{requestarrayids}); # not defined for load
+
 		    if ($api_response->is_success()) # https status code is 2xx
 		    {
 			$ids->{$requestobjectid}->{success}  = 1;
-			$ids->{$requestobjectid}->{appsid}   = decode_json($api_response->{_request}->{_headers}->{requestarrayids}) if (defined $api_response->{_request}->{_headers}->{requestarrayids}); # not defined for load
-			$ids->{$requestobjectid}->{content}  = undef;
 
-			if (($api_response->content) && (defined (my $api_data = decode_json($api_response->content))))
+			if (($api_response->content) && (defined (my $content = decode_json($api_response->content))))
 			{
-			    debug(sprintf("Parallel response OK for %s (content)", defined ($api_response->{_request}->{_headers}->{expectnewid}) ? $api_data->{id} : "REQUESTOBJECTID: requestobjectid"), 'green', ($DEBUG > 4));
-			    $ids->{$requestobjectid}->{appsid}[0] = $api_data->{id} if ((defined $api_response->{_request}->{_headers}->{expectnewid}) && ($api_response->{_request}->{_headers}->{expectnewid})); # not defined for load
-			    $ids->{$requestobjectid}->{content}   = $api_data;
+			    debug(sprintf("Parallel response OK for %s (content)", defined ($headers->{expectnewid}) ? $content->{id} : "REQUESTOBJECTID: requestobjectid"), 'green', ($DEBUG > 4));
+			    $ids->{$requestobjectid}->{appsid}[0] = $content->{id} if ((defined $headers->{expectnewid}) && ($headers->{expectnewid})); # not defined for load
+			    $ids->{$requestobjectid}->{content}   = $content;
 			}
 			else
 			{
-			    debug(sprintf("Parallel response OK for %s (no content)", $api_response->{_request}->{_headers}->{requestobjectid}), 'green', ($DEBUG > 4));
+			    debug(sprintf("Parallel response OK for %s (no content)", $headers->{requestobjectid}), 'green', ($DEBUG > 4));
+			    $ids->{$requestobjectid}->{content}   = undef;
 			}
 		    }
 		    else
 		    {
-			my $api_data = undef;
-			$api_data = decode_json($api_response->content) if ((defined $api_response->content) && ($api_response->code == 404));
+			#my $content = decode_json($api_response->content) if (($api_response->content) && ($api_response->code == 404));
+			my $content = decode_json($api_response->content) if ($api_response->content);
+			$ids->{$requestobjectid}->{success}  = 0; # default
 
 			if ($api_response->code == 401)
 			{ # 401: invalid access token
 			    debug("Access token invalid. Trying again", 'yellow', ($DEBUG > 4));
 			    $access_token = undef; # invalidate access_token
 			}
-			elsif ($api_response->code == 503)
-			{ # 503: Service unavailable. Please try again
-			    debug("Service unavailable. Trying again", 'yellow', ($DEBUG > 4));
-			}
 			elsif (($api_response->code == 404) &&
-			       (defined $api_data) && (defined $api_data->{error}) && (defined $api_data->{error}->{message}) &&
+			       (defined $content) && (defined $content->{error}) && (defined $content->{error}->{message}) &&
 			       (defined $api_response->{_request}) && (defined $api_response->{_request}->{_method}) && ($api_response->{_request}->{_method} eq "GET") &&
-			       ($api_data->{error}->{message} eq "Resource Not Found: photo"))
+			       ($content->{error}->{message} eq "Resource Not Found: photo"))
 			{ # photo for this user is not present (valid only for GET)
 			    debug(sprintf("Parallel response OK for $requestobjectid (with exit code 404 ~ no photo for this user defined) (DONE)"), 'green', ($DEBUG > 4));
 			    $ids->{$requestobjectid}->{success} = 1;
 			    $ids->{$requestobjectid}->{content} = {};
+			}
+			elsif ($api_response->code == 503)
+			{ # 503: Service unavailable. Please try again
+			    debug("Service unavailable. Trying again", 'yellow', ($DEBUG > 4));
 			}
 			else
 			{
 			    debug(sprintf("ERROR answer for %s (%s) was %s : %s", $api_response->request->url, $requestobjectid, $api_response->code, $api_response->message), 'yellow');
 			    $ids->{$requestobjectid}->{try}++;
 			}
+			#printf(Dumper($api_response));
 		    }
 		}
 		else
@@ -1575,14 +1577,15 @@ sub traverse
 		if ($process_status->{$requestobjectid}->{success})
 		{
 		    debug(sprintf("%s response: %s", $operation, Dumper($process_status->{$requestobjectid})), 'green', ($DEBUG > 4));
-		    debug(sprintf("Parallel proces response: OK: %s for %s, %s, %s", $beautify_comp_debug->{$operation}, uc($scope), $appsid->[0], $appsid->[2]), 'green', ($DEBUG > 1));
 
-		    if ((defined $apps_data) &&
-			(defined $apps_data->{apps}) &&
-			(defined $apps_data->{apps}->{$scope}->{$appsid->[2]}) &&
-			(defined $apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}) &&
-			(defined $apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]}))
+		    if ((defined $appsid) &&
+			(defined $appsid->[2]) &&
+			(defined $appsid->[1]) &&
+			(defined $appsid->[0])
+		       )
 		    {
+			debug(sprintf("Parallel proces response: OK: %s for %s, %s, %s", $beautify_comp_debug->{$operation}, uc($scope), $appsid->[0], $appsid->[2]), 'green', ($DEBUG > 1));
+
 			if ((defined $process_status->{$requestobjectid}) && (defined $process_status->{$requestobjectid}->{content}))
 			{
 			    debug(sprintf("Add new content to cache \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 3));
@@ -1603,6 +1606,7 @@ sub traverse
 		}
 		else
 		{
+		    printf("%s\n", Dumper($process_status->{$requestobjectid}));
 		    debug(sprintf("Parallel proces response: ERROR: %s for %s, %s, %s", $beautify_comp_debug->{$operation}, uc($scope), defined($appsid->[0]) ? $appsid->[0] : "N/A", defined($appsid->[2]) ? $appsid->[2] : "N/A"), 'red');
 		}
 	    }
@@ -1614,22 +1618,12 @@ sub traverse
     }
 }
 
-sub get_group_ids_ref
+sub get_ids_ref
 {
-    my ($apps_data) = @_;
+    my ($apps_data, $scope) = @_;
 
-    # define $apps_data->{apps}->{groups}->{1} if not exists
-    my @ids = keys %{$apps_data->{apps}->{groups}->{1}->{hash}};
-
-    return \@ids;
-}
-
-sub get_users_ids_ref
-{
-    my ($apps_data) = @_;
-
-    # define $apps_data->{apps}->{users}->{1} if not exists
-    my @ids = keys %{$apps_data->{apps}->{users}->{1}->{hash}};
+    # define $apps_data->{apps}->{$scope}->{1} if not exists
+    my @ids = keys %{$apps_data->{apps}->{$scope}->{1}->{hash}};
 
     return \@ids;
 }
@@ -1639,12 +1633,6 @@ sub get_single_member_undef_arr
     my @undef_array = (undef);
 
     return \@undef_array;
-}
-
-sub test___compare_data
-{
-    my ($data, $data_old) = @_;
-
 }
 
 ##############################################################################
@@ -1705,16 +1693,16 @@ else
     get_apps_data_single_scope_parallel($cachetime->{apps}->{groups}, $apps_data, 'groups', get_single_member_undef_arr(), 1);
     monitoring2("Retrieving groups from APPS domain", ($DEBUG));
 
-    monitoring2("Retrieving members in groups from APPS domain", ($DEBUG));
-    get_apps_data_single_scope_parallel($cachetime->{apps}->{members}, $apps_data, 'members', get_group_ids_ref($apps_data), 0);
-    monitoring2("Retrieving members in groups from APPS domain", ($DEBUG));
+    monitoring2("Retrieving group members from APPS domain", ($DEBUG));
+    get_apps_data_single_scope_parallel($cachetime->{apps}->{members}, $apps_data, 'members', get_ids_ref($apps_data, 'groups'), 0);
+    monitoring2("Retrieving group members from APPS domain", ($DEBUG));
 
     monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
-    get_apps_data_single_scope_parallel($cachetime->{apps}->{photos}, $apps_data, 'photos', get_users_ids_ref($apps_data), 0);
+    get_apps_data_single_scope_parallel($cachetime->{apps}->{photos}, $apps_data, 'photos', get_ids_ref($apps_data, 'users'), 0);
     monitoring2("Retrieving user photos from APPS domain", ($DEBUG));
 
     monitoring2("Retrieving user aliases from APPS domain", ($DEBUG));
-    get_apps_data_single_scope_parallel($cachetime->{apps}->{aliases}, $apps_data, 'aliases', get_users_ids_ref($apps_data), 0);
+    get_apps_data_single_scope_parallel($cachetime->{apps}->{aliases}, $apps_data, 'aliases', get_ids_ref($apps_data, 'users'), 0);
     monitoring2("Retrieving user aliases from APPS domain", ($DEBUG));
 
     # temporary for tests
