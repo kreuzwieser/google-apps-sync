@@ -57,7 +57,7 @@ sub load_scopes_from_cache_dir
 
 sub save_scopes_to_cache_dir
 {
-    my ($apps_data, $ts_start) = @_;
+    my ($apps_data, $ts_start_ref) = @_;
 
     foreach my $part (keys %{$apps_data})
     {
@@ -70,7 +70,7 @@ sub save_scopes_to_cache_dir
 		{
 		    if (defined $apps_data->{$part}->{$scope}->{$o}->{last})
 		    {
-			if ($apps_data->{$part}->{$scope}->{$o}->{last} >= $ts_start)
+			if ($apps_data->{$part}->{$scope}->{$o}->{last} >= ${$ts_start_ref})
 			{
 			    debug("Save $part -> $scope -> {$o} to cache", 'white');
 			    save_scopes_to_cache($apps_data->{$part}->{$scope}->{$o}, "$CACHE_DIRECTORY/$part/$scope/$o") 
@@ -88,12 +88,12 @@ sub save_scopes_to_cache_dir
 		my $last = $apps_data->{$part}->{$scope}->{last} if (defined $apps_data->{$part}->{$scope}->{last});
 		if ((defined $apps_data->{$part}->{$scope}->{1}) && (defined $apps_data->{$part}->{$scope}->{1}->{last})) # check both for avoid autovivification
 		{
-		    $last = $apps_data->{$part}->{$scope}->{1}->{last} 
+		    $last = $apps_data->{$part}->{$scope}->{1}->{last};
 		}
 
 		if (defined $last)
 		{
-		    if ($last >= $ts_start)
+		    if ($last >= ${$ts_start_ref})
 		    {
 			debug("Save $part->$scope to cache", 'white');
 			save_scopes_to_cache($apps_data->{$part}->{$scope}, "$CACHE_DIRECTORY/$part/$scope");
@@ -106,6 +106,8 @@ sub save_scopes_to_cache_dir
 	    }
 	}
     }
+
+    ${$ts_start_ref} = time;
 }
 
 # load JSON formated data from file and return as data sructure

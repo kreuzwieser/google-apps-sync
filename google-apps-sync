@@ -3,9 +3,10 @@
 # Tomas Kreuzwieser <kreuzwieser@ro.vutbr.cz>, 2014, 2015
 
 # TODO:
-# neukladat data cache co se nemenila
+# neukladat data do cache vicekrat nez je treba
 # otestovat http://stackoverflow.com/questions/7809740/how-can-i-catch-a-failed-to-decode-json-error-message-in-perl na test spravnosti jsonu
-# done: projit a overit problem s autovivification
+# DONE:
+# projit a overit problem s autovivification
 
 ##############################################################################
 # MODULES
@@ -35,7 +36,6 @@ use MIME::Base64 qw(encode_base64 decode_base64 encode_base64url decode_base64ur
 use Encode qw(encode);
 use Try::Tiny;
 use Proc::PID::File;
-#use Devel::Size qw(total_size);
 use Digest::MD5 qw(md5 md5_hex md5_base64);
 
 ##############################################################################
@@ -299,26 +299,24 @@ sub AD_get_data_from_ldap
 # load new data from AD/LDAP (all scopes)
 sub AD_get_all_new_data_from_ldap
 {
-    my ($apps_data, $cache_time) = @_;
+    my ($apps_data, $cache_time, $last_save_ref) = @_;
 
     my $ldap = AD_Connect($LDAP_CONFIG->{LDAP_HOST}, $LDAP_CONFIG->{LDAP_USER}, $LDAP_CONFIG->{LDAP_PASSWORD});
-    my $start_ldap = time;
 
     foreach my $scope (keys %{$LDAP_SEARCH->{DN}})
     {
 	if ((!defined $apps_data->{ldap}->{$scope}->{last}) || (($apps_data->{ldap}->{$scope}->{last} < (time - $cache_time->{$scope}))))
 	{
 	    debug("Loading ldap data for $scope", 'white', ($DEBUG > 3));
+	    $apps_data->{ldap}->{$scope}->{last} = time; # time before load
 	    $apps_data->{ldap}->{$scope}->{data} = AD_get_data_from_ldap($ldap, $LDAP_SEARCH->{BASE}, $LDAP_SEARCH->{DN}->{$scope}, $scope, {});
-	    $apps_data->{ldap}->{$scope}->{last} = time;
+	    save_scopes_to_cache_dir($apps_data, $last_save_ref);
 	}
 	else
 	{
 	    debug("Ldap data for $scope already cached", 'white', ($DEBUG > 4));
 	}
     }
-
-    save_scopes_to_cache_dir($apps_data, $start_ldap);
 
     # odpojeni od AD
     AD_Close($ldap);
@@ -1639,7 +1637,7 @@ sub get_single_member_undef_arr
 # MAIN
 ##############################################################################
 
-my $TS_START = time;
+my $TS_LAST_SAVE = time;
 
 # argument processing
 GetOptions(
@@ -1679,7 +1677,7 @@ else
     debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
     monitoring2("Retrieving data from LDAP", ($DEBUG));
-    AD_get_all_new_data_from_ldap($apps_data, $cachetime->{ldap});
+    AD_get_all_new_data_from_ldap($apps_data, $cachetime->{ldap}, \$TS_LAST_SAVE);
     monitoring2("Retrieving data from LDAP", ($DEBUG));
 
     # temporary for tests
@@ -1711,7 +1709,7 @@ else
     if (scalar(map {$_ ? () : $_} values %{$cachetime->{apps}}))
     { # if refresh data from Google APPS, then save cache immediate
 	monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
-	save_scopes_to_cache_dir($apps_data, $TS_START);
+	save_scopes_to_cache_dir($apps_data, \$TS_LAST_SAVE);
 	monitoring2("Saving data immediate to cache - per partes", ($DEBUG));
     }
 
@@ -1739,7 +1737,7 @@ else
     debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
     monitoring2("Saving data to cache - per partes", ($DEBUG));
-    save_scopes_to_cache_dir($apps_data, $TS_START);
+    save_scopes_to_cache_dir($apps_data, \$TS_LAST_SAVE);
     monitoring2("Saving data to cache - per partes", ($DEBUG));
 }
 
