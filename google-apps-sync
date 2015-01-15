@@ -138,11 +138,11 @@ my $ldap_sumarize_config = {
 };
 
 my $apps_retr_config = {
-	users   => { priority => 1, ids_gen => \&get_undef_aref, refer => undef    },
-	groups  => { priority => 2, ids_gen => \&get_undef_aref, refer => undef    },
-	members => { priority => 3, ids_gen => \&get_ids_ref,    refer => 'groups' },
-	photos  => { priority => 4, ids_gen => \&get_ids_ref,    refer => 'users'  },
-	aliases => { priority => 5, ids_gen => \&get_ids_ref,    refer => 'users'  },
+	users   => { priority => 1 },
+	groups  => { priority => 2 },
+	members => { priority => 3 },
+	photos  => { priority => 4 },
+	aliases => { priority => 5 },
 };
 
 my $traverse_config = {
@@ -184,6 +184,8 @@ sub AD_get_data_from_ldap
     my ($ldap, $base, $base_dn, $searchtype, $add_params) = @_;
 
     my $save_byDN = 0;
+
+    monitoring2("Retrieving data from LDAP", ($DEBUG)); # start
 
     # AD requires paged searches to return more than 1000 objects 
     my $page = Net::LDAP::Control::Paged->new(size => 1000);
@@ -308,6 +310,8 @@ sub AD_get_data_from_ldap
 	$page->size(0);
 	$ldap->search(@{$params->{$searchtype}->{search_params}});
     }
+
+    monitoring2("Retrieving data from LDAP", ($DEBUG)); # end
 
     return $ad_data;
 }
@@ -479,10 +483,9 @@ sub get_number_of_requests
 # get data from Google APPS in parallel
 sub get_apps_data_scope
 {
-    my ($data, $scope, $cache_time, $objs) = @_;
+    my ($data, $scope, $cache_time) = @_;
 
     my $iter_counter   = 0;
-    my $purge_all      = 0;
     my $objs_data      = ();
     my $objs_nicache   = ();
 
@@ -502,14 +505,18 @@ sub get_apps_data_scope
 	aliases                 => 'alias',
     };
 
-    foreach my $requestobjectid (@$objs)
+    my $object_lists = {
+	users                   => [ 1 ],
+	groups                  => [ 1 ],
+	members                 => [ keys %{$data->{apps}->{groups}->{1}->{hash}} ],
+	orgunits                => [ keys %{$data->{apps}->{users}->{1}->{hash}} ],
+	aliases                 => [ keys %{$data->{apps}->{users}->{1}->{hash}} ],
+    };
+
+    monitoring2("Retrieving $scope from APPS domain", ($DEBUG)); # start
+
+    foreach my $requestobjectid (@{$object_lists->{$scope}})
     {
-	if (!defined $requestobjectid)
-	{
-	    $requestobjectid = 1; # many object in single google apps request
-	    $purge_all       = 1; # purge all data at start
-	}
-	
 	if ((!defined $data->{apps}->{$scope}->{$requestobjectid}) || (!defined $data->{apps}->{$scope}->{$requestobjectid}->{last}) || (($data->{apps}->{$scope}->{$requestobjectid}->{last} < (time - $cache_time))))
 	{
 	    $objs_nicache->{$requestobjectid} = 1;
@@ -591,6 +598,8 @@ sub get_apps_data_scope
 	    }
 	}
     }
+
+    monitoring2("Retrieving $scope from APPS domain", ($DEBUG)); # end
 }
 
 sub whitespaces_replace
@@ -1568,9 +1577,9 @@ sub callback_alias_common
 ##############################################################################
 # TRAVERSE functions (make diff, make requests and run parallel)
 ##############################################################################
-sub traverse
+sub traverse_apps_data_scope
 {
-    my ($scope, $apps_data, $diff) = @_;
+    my ($apps_data, $scope, $diff) = @_;
 
     my $requests_generators = {
 	users => {
@@ -1597,6 +1606,8 @@ sub traverse
 	    DISCARD_B => \&requests_generator_add_alias,      # add
 	},
     };
+
+    monitoring2("Process $scope data by traverse", ($DEBUG)); # start
 
     foreach my $operation (sort keys %{$diff}) # CHANGE, DISCARD_A/remove, DISCARD_B/add (remove first and run add)
     {
@@ -1625,14 +1636,14 @@ sub traverse
 			{
 			    debug(sprintf("Add new content to cache \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 3));
 			    $apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]} = $process_status->{$requestobjectid}->{content};
-			    debug(sprintf("Add new last timestamp to cache \$apps_data->{apps}->{%s}->{last}", $scope, $appsid->[2]), 'green', ($DEBUG > 3));
-			    $apps_data->{apps}->{$scope}->{$appsid->[2]}->{last} = time;
 			}
 			else
 			{
 			    debug(sprintf("Delete cache structure part \$apps_data->{apps}->{%s}->{%s}->{%s}->{%s}", $scope, $appsid->[2], $appsid->[1], $appsid->[0]), 'green', ($DEBUG > 3));
 			    delete($apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]});
 			}
+			debug(sprintf("Add new last timestamp to cache \$apps_data->{apps}->{%s}->{last}", $scope, $appsid->[2]), 'green', ($DEBUG > 3));
+			$apps_data->{apps}->{$scope}->{$appsid->[2]}->{last} = time;
 		    }
 		    else
 		    {
@@ -1651,23 +1662,8 @@ sub traverse
 	    debug(sprintf("Request generator for %s and operation %s not defined", uc($scope), $beautify_comp_debug->{$operation}), 'yellow');
 	}
     }
-}
 
-sub get_ids_ref
-{
-    my ($apps_data, $scope) = @_;
-
-    # define $apps_data->{apps}->{$scope}->{1} if not exists
-    my @ids = keys %{$apps_data->{apps}->{$scope}->{1}->{hash}};
-
-    return \@ids;
-}
-
-sub get_undef_aref
-{
-    my @undef_array = (undef);
-
-    return \@undef_array;
+    monitoring2("Process $scope data by traverse", ($DEBUG)); # end
 }
 
 ##############################################################################
@@ -1697,7 +1693,8 @@ GetOptions(
 
 if (Proc::PID::File->running(dir=>"."))
 {
-    debug("Already running!", 'red');
+    debug("Program $0 already running!", 'red');
+
     exit(1);
 }
 else
@@ -1713,19 +1710,15 @@ else
     # temporary for tests
     #debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
-    monitoring2("Retrieving data from LDAP", ($DEBUG));
     AD_get_all_new_data_from_ldap($apps_data, $cachetime->{ldap}, \$TS_LAST_SAVE);
-    monitoring2("Retrieving data from LDAP", ($DEBUG));
 
     # temporary for tests
     #debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
     foreach my $scope (sort { $apps_retr_config->{$a}->{priority} <=> $apps_retr_config->{$b}->{priority} } keys(%{$apps_retr_config}))
     { # retrive uncached data from APPS
-	monitoring2("Retrieving $scope from APPS domain", ($DEBUG));
-	get_apps_data_scope($apps_data, $scope, $cachetime->{apps}->{$scope}, &{$apps_retr_config->{$scope}->{ids_gen}}($apps_data, $apps_retr_config->{$scope}->{refer}));
+	get_apps_data_scope($apps_data, $scope, $cachetime->{apps}->{$scope});
 	save_scopes_to_cache_dir($apps_data, \$TS_LAST_SAVE);
-	monitoring2("Retrieving $scope from APPS domain", ($DEBUG));
     }
 
     # temporary for tests
@@ -1733,10 +1726,8 @@ else
 
     foreach my $scope (sort { $traverse_config->{$a}->{priority} <=> $traverse_config->{$b}->{priority} } keys(%{$traverse_config}))
     { # sync data between AD/LDAP and APPS
-	monitoring2("Process $scope data by traverse", ($DEBUG));
-	traverse($scope, $apps_data, diff_caller($scope, $apps_data));
+	traverse_apps_data_scope($apps_data, $scope, diff_caller($scope, $apps_data));
 	save_scopes_to_cache_dir($apps_data, \$TS_LAST_SAVE);
-	monitoring2("Process $scope data by traverse", ($DEBUG));
     }
 
     # temporary for tests
