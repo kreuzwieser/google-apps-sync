@@ -62,10 +62,10 @@ sub compare_and_process
     my $transforms = shift || {};
     my $arguments  = shift || {};
 
-    my $callback_match     = $callbacks->{MATCH}     || sub { my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_; printf("(depth %d) %s\n%s => %s\n", $arguments->{CL}->{DEPTH}, $operation, $pk, Dumper($a->{$pk})) };
-    my $callback_discard_a = $callbacks->{DISCARD_A} || sub { my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_; printf("(depth %d) %s\n%s => %s\n", $arguments->{CL}->{DEPTH}, $operation, $pk, Dumper($a->{$pk})) };
-    my $callback_discard_b = $callbacks->{DISCARD_B} || sub { my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_; printf("(depth %d) %s\n%s => %s\n", $arguments->{CL}->{DEPTH}, $operation, $pk, Dumper($b->{$pk})) };
-    my $callback_change    = $callbacks->{CHANGE}    || sub { my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_; printf("(depth %d) %s\n%s => %sTO\n%s => %s\n", $arguments->{CL}->{DEPTH}, $operation, $pk, Dumper($a->{$pk}), $pk, Dumper($b->{$pk})) };
+    my $callback_match     = $callbacks->{MATCH}     || sub { my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_; printf("(depth %d) %s\n%s => %s\n", $arguments->{CL}->{DEPTH}, $operation, $pk, Dumper($a->{$pk})); };
+    my $callback_discard_a = $callbacks->{DISCARD_A} || sub { my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_; printf("(depth %d) %s\n%s => %s\n", $arguments->{CL}->{DEPTH}, $operation, $pk, Dumper($a->{$pk})); };
+    my $callback_discard_b = $callbacks->{DISCARD_B} || sub { my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_; printf("(depth %d) %s\n%s => %s\n", $arguments->{CL}->{DEPTH}, $operation, $pk, Dumper($b->{$pk})); };
+    my $callback_change    = $callbacks->{CHANGE}    || sub { my ($pk, $a, $b, $callbacks, $transforms, $arguments, $operation) = @_; printf("(depth %d) %s\n%s => %sTO\n%s => %s\n", $arguments->{CL}->{DEPTH}, $operation, $pk, Dumper($a->{$pk}), $pk, Dumper($b->{$pk})); };
 
     my $transform_a        = $transforms->{TRANSFORM_A} || sub { return shift() };
     my $transform_b        = $transforms->{TRANSFORM_B} || sub { return shift() };

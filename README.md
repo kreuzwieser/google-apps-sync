@@ -6,6 +6,10 @@ Utility google-apps-sync is a command line tool that allows administrators synch
 
 This script was created at Brno University of Technology as alternative to Google GADS synchronization tool. Compared to the GADS tool, this script is open source, more flexible, faster and perhaps has less errors.
 
+Important notice
+----------------
+In the case of use outside the Brno University of Technology, it will be necessary to make minor adjustments in the code.
+
 Implemented functions
 ---------------------
 Currently this script can do this:

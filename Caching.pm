@@ -70,8 +70,11 @@ sub save_scopes_to_cache_dir
 		{
 		    if (defined $apps_data->{$part}->{$scope}->{$o}->{last})
 		    {
-			if ($apps_data->{$part}->{$scope}->{$o}->{last} >= ${$ts_start_ref})
-			{
+			my $last = $apps_data->{$part}->{$scope}->{$o}->{last};
+			$apps_data->{$part}->{$scope}->{$o}->{last}--;
+
+			if (($last >= ${$ts_start_ref}) || ($last == 1))
+			{ # 1 ~ save and reload in next run
 			    debug("Save $part -> $scope -> {$o} to cache", 'white');
 			    save_scopes_to_cache($apps_data->{$part}->{$scope}->{$o}, "$CACHE_DIRECTORY/$part/$scope/$o") 
 			}
@@ -85,16 +88,23 @@ sub save_scopes_to_cache_dir
 	    else
 	    {
 		make_path("$CACHE_DIRECTORY/$part");
-		my $last = $apps_data->{$part}->{$scope}->{last} if (defined $apps_data->{$part}->{$scope}->{last});
-		if ((defined $apps_data->{$part}->{$scope}->{1}) && (defined $apps_data->{$part}->{$scope}->{1}->{last})) # check both for avoid autovivification
+		my $last = undef;
+		
+		if (defined $apps_data->{$part}->{$scope}->{last})
+		{
+		    $last = $apps_data->{$part}->{$scope}->{last};
+		    $apps_data->{$part}->{$scope}->{last}--;
+		}
+		elsif ((defined $apps_data->{$part}->{$scope}->{1}) && (defined $apps_data->{$part}->{$scope}->{1}->{last})) # check both for avoid autovivification
 		{
 		    $last = $apps_data->{$part}->{$scope}->{1}->{last};
+		    $apps_data->{$part}->{$scope}->{1}->{last}--;
 		}
 
 		if (defined $last)
 		{
-		    if ($last >= ${$ts_start_ref})
-		    {
+		    if (($last >= ${$ts_start_ref}) || ($last == 1))
+		    { # 1 ~ save and reload in next run
 			debug("Save $part -> $scope to cache", 'white');
 			save_scopes_to_cache($apps_data->{$part}->{$scope}, "$CACHE_DIRECTORY/$part/$scope");
 		    }

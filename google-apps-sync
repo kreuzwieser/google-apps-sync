@@ -3,7 +3,6 @@
 # Tomas Kreuzwieser <kreuzwieser@ro.vutbr.cz>, 2014, 2015
 
 # TODO:
-# neukladat data do cache vicekrat nez je treba
 # otestovat http://stackoverflow.com/questions/7809740/how-can-i-catch-a-failed-to-decode-json-error-message-in-perl na test spravnosti jsonu
 # DONE:
 # projit a overit problem s autovivification
@@ -89,7 +88,7 @@ my $LDAP_SEARCH = GoogleAppSyncSettings::get_LDAP_SEARCH();
 my $access_token = undef;
 
 # default debug settings
-my $DEBUG         = 4; # 0 - 5
+my $DEBUG         = 3; # 0 - 5
 
 # default process or simulate only (1 = process)
 my $PROCESS       = 1;
@@ -110,31 +109,15 @@ my $cachetime = {
     apps => {
         users    => 1 * 24 * 3600,
         groups   => 1 * 24 * 3600,
-        members  => 7 * 24 * 3600,
-        photos   => 7 * 24 * 3600,
-        aliases  => 7 * 24 * 3600,
+        members  => 1 * 24 * 3600,
+        photos   => 3 * 24 * 3600,
+        aliases  => 3 * 24 * 3600,
     },
     ldap => {
 	users    => 4 * 3600,
 	groups   => 4 * 3600,
 	photos   => 4 * 3600,
     },
-};
-
-# configuration for data sumarization
-my $ldap_sumarize_config = {
-	users => {
-	    ids => {
-		member => 'userPrincipalName',
-		parent => 'mail',
-	    },
-	},
-	groups => {
-	    ids => {
-		member => 'mail',
-		parent => 'mail',
-	    },
-	},
 };
 
 my $apps_retr_config = {
@@ -181,11 +164,9 @@ sub AD_Close
 # nevim proc, ale hodnoty je nutne prohanet pres sprintf
 sub AD_get_data_from_ldap
 {
-    my ($ldap, $base, $base_dn, $searchtype, $add_params) = @_;
+    my ($ldap, $base, $base_dn, $searchtype, $save_byDN, $add_params) = @_;
 
-    my $save_byDN = 0;
-
-    monitoring2("Retrieving data from LDAP", ($DEBUG)); # start
+    monitoring2("Retrieving data for $searchtype from LDAP", ($DEBUG)); # start
 
     # AD requires paged searches to return more than 1000 objects 
     my $page = Net::LDAP::Control::Paged->new(size => 1000);
@@ -311,7 +292,7 @@ sub AD_get_data_from_ldap
 	$ldap->search(@{$params->{$searchtype}->{search_params}});
     }
 
-    monitoring2("Retrieving data from LDAP", ($DEBUG)); # end
+    monitoring2("Retrieving data for $searchtype from LDAP", ($DEBUG)); # end
 
     return $ad_data;
 }
@@ -328,8 +309,8 @@ sub AD_get_all_new_data_from_ldap
 	if ((!defined $apps_data->{ldap}->{$scope}->{last}) || (($apps_data->{ldap}->{$scope}->{last} < (time - $cache_time->{$scope}))))
 	{
 	    debug("Loading ldap data for $scope", 'white', ($DEBUG > 3));
-	    $apps_data->{ldap}->{$scope}->{last} = time; # time before load
-	    $apps_data->{ldap}->{$scope}->{data} = AD_get_data_from_ldap($ldap, $LDAP_SEARCH->{BASE}, $LDAP_SEARCH->{DN}->{$scope}, $scope, {});
+	    $apps_data->{ldap}->{$scope}->{last} = time + 1; # time before load
+	    $apps_data->{ldap}->{$scope}->{data} = AD_get_data_from_ldap($ldap, $LDAP_SEARCH->{BASE}, $LDAP_SEARCH->{DN}->{$scope}, $scope, 0, {});
 	    save_scopes_to_cache_dir($apps_data, $last_save_ref);
 	}
 	else
@@ -573,7 +554,7 @@ sub get_apps_data_scope
 
 			if (defined $content->{nextPageToken})
 			{
-			    debug(sprintf("Load response OK for $requestobjectid (NEXT, PARTIAL COUNT: %d)", scalar keys(%{$data->{apps}->{$scope}->{$requestobjectid}->{hash}})), 'green', ($DEBUG > 3));
+			    debug(sprintf("Load response OK for $requestobjectid (NEXT, PARTIAL COUNT: %d)", scalar keys(%{$data->{apps}->{$scope}->{$requestobjectid}->{hash}})), 'green', ($DEBUG > 2));
 			    $objs_data->{$requestobjectid}->{pageToken} = $content->{nextPageToken};
 			    $objs_data->{$requestobjectid}->{page_counter} ++;
 			}
@@ -581,7 +562,7 @@ sub get_apps_data_scope
 			{
 			    debug(sprintf("Load response OK for $requestobjectid (DONE, COUNT: %d)", scalar keys(%{$data->{apps}->{$scope}->{$requestobjectid}->{hash}})), 'green', ($DEBUG > 2));
 			    $objs_nicache->{$requestobjectid} = 0;
-			    $data->{apps}->{$scope}->{$requestobjectid}->{last} = time;
+			    $data->{apps}->{$scope}->{$requestobjectid}->{last} = time + 1;
 			}
 		    }
 		    else
@@ -671,6 +652,15 @@ sub get_id_from_description
     return undef;
 }
 
+sub primaryEmail
+{
+    my ($email, $moredetails) = @_;
+
+    #$email =~ s/\@vutbr\.cz$/\@vut\.cz/;
+
+    return lc($email);
+}
+
 sub diff_users
 {
     my ($apps_data) = @_;
@@ -678,14 +668,14 @@ sub diff_users
     my $scope = 'users';
     my $apps_ldapid_to_appsid = (); # conversion hash
 
-    my $users_apps = ();
+    my $apps = ();
     if (defined $apps_data->{apps}->{$scope}->{1}->{hash})
     {
 	foreach (keys %{$apps_data->{apps}->{$scope}->{1}->{hash}})
 	{
 	    if (defined (my $id = get_id_from_externalIds_etc($apps_data->{apps}->{$scope}->{1}->{hash}->{$_})))
 	    {
-		$users_apps->{$id} = {
+		$apps->{$id} = {
 		    name                       => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{name},
 		    primaryEmail               => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{primaryEmail},
 		    externalIds                => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{externalIds},
@@ -703,20 +693,20 @@ sub diff_users
 	}
     }
 
-    my $users_ldap = ();
+    my $ldap = ();
     if (defined $apps_data->{ldap}->{$scope}->{data}->{byID})
     {
 	foreach (keys %{$apps_data->{ldap}->{$scope}->{data}->{byID}})
 	{
 	    if (defined (my $id = $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}))
 	    {
-		$users_ldap->{$apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}} = {
+		$ldap->{$apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{employeeID}} = {
 		    name                       => {
 		                                    fullName   => sprintf("%s %s", unknown_name_replace($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{givenName}), unknown_name_replace($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{sn})),
 		                                    givenName  => unknown_name_replace($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{givenName}),
 		                                    familyName => unknown_name_replace($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{sn})
 		                                  },
-		    primaryEmail               => lc($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{userPrincipalName}),
+		    primaryEmail               => primaryEmail($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{userPrincipalName}, { id => $id }),
 		    externalIds                => [
 		                                    {
 		                                        value      => $id,
@@ -748,7 +738,7 @@ sub diff_users
 	    }
 	};
 
-    Diff::compare_and_process($users_apps, $users_ldap,
+    Diff::compare_and_process($apps, $ldap,
 	{
 	    MATCH     => sub {},
 	    DISCARD_A => \&callback_remove,
@@ -769,14 +759,14 @@ sub diff_groups
     my $scope = 'groups';
     my $apps_ldapid_to_appsid = (); # conversion hash
 
-    my $groups_apps = ();
+    my $apps = ();
     if (defined $apps_data->{apps}->{$scope}->{1}->{hash})
     {
 	foreach (keys %{$apps_data->{apps}->{$scope}->{1}->{hash}})
 	{
 	    if (defined (my $id = get_id_from_description($apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{description})))
 	    {
-		$groups_apps->{$id} = {
+		$apps->{$id} = {
 		    email       => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{email},
 		    name        => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{name},
 		    description => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{description},
@@ -788,14 +778,14 @@ sub diff_groups
 	}
     }
 
-    my $groups_ldap = ();
+    my $ldap = ();
     if (defined $apps_data->{ldap}->{$scope}->{data}->{byID})
     {
 	foreach (keys %{$apps_data->{ldap}->{$scope}->{data}->{byID}})
 	{
 	    if (defined (my $id = get_id_from_description($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{description})))
 	    {
-		$groups_ldap->{$id} = {
+		$ldap->{$id} = {
 		    email       => $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{mail},
 		    name        => whitespaces_replace(lc($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{sAMAccountName})),
 		    description => $apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}->{description},
@@ -817,7 +807,7 @@ sub diff_groups
 	    },
     };
 
-    Diff::compare_and_process($groups_apps, $groups_ldap,
+    Diff::compare_and_process($apps, $ldap,
 	{
 	    MATCH     => sub {},
 	    DISCARD_A => \&callback_remove,
@@ -837,6 +827,22 @@ sub diff_members
 
     my $scope = 'members';
     my $apps_ldapid_to_appsid = (); # conversion hash
+
+    # configuration for data sumarization
+    my $ldap_sumarize_config = {
+	users => {
+	    ids => {
+		member => 'userPrincipalName',
+		parent => 'mail',
+	    },
+	},
+	groups => {
+	    ids => {
+		member => 'mail',
+		parent => 'mail',
+	    },
+	},
+    };
 
     # prepare APPS site group members structure
     my $apps_structgroups = ();
@@ -1132,7 +1138,7 @@ sub process_parallel
 
     while ((my %ids_index = map {$_ => $ids->{$_}->{try}} (map { (($ids->{$_}->{try} <= $APPS_CONFIG->{APPS_TRY_MAX}) && (!($ids->{$_}->{success}))) ? $_ : () } keys %{$ids})) && ($process))
     {
-	my $pua = generate_parallel_useragent();
+	my $pua = generate_parallel_useragent(); # generate new empty ua in every cycle
 
 	if (my $nof_requests = register_requests($pua, &$requests_generator($user_data, \%ids_index)))
 	{
@@ -1191,7 +1197,7 @@ sub process_parallel
 			}
 			else
 			{
-			    debug(sprintf("ERROR answer for %s (%s) was %s : %s", $api_response->request->url, $requestobjectid, $api_response->code, $api_response->message), 'yellow');
+			    debug(sprintf("ERROR answer for %s (requestobjectid %s) was %s : %s", $api_response->request->url, $requestobjectid, $api_response->code, $api_response->message), 'yellow');
 			    $ids->{$requestobjectid}->{try}++;
 			}
 			#printf(Dumper($api_response));
@@ -1643,7 +1649,7 @@ sub traverse_apps_data_scope
 			    delete($apps_data->{apps}->{$scope}->{$appsid->[2]}->{$appsid->[1]}->{$appsid->[0]});
 			}
 			debug(sprintf("Add new last timestamp to cache \$apps_data->{apps}->{%s}->{last}", $scope, $appsid->[2]), 'green', ($DEBUG > 3));
-			$apps_data->{apps}->{$scope}->{$appsid->[2]}->{last} = time;
+			$apps_data->{apps}->{$scope}->{$appsid->[2]}->{last} = time + 1;
 		    }
 		    else
 		    {
@@ -1654,6 +1660,27 @@ sub traverse_apps_data_scope
 		{
 		    #printf("%s\n", Dumper($process_status->{$requestobjectid}));
 		    debug(sprintf("Parallel proces response: ERROR: %s for %s, %s, %s", $beautify_comp_debug->{$operation}, uc($scope), defined($appsid->[0]) ? $appsid->[0] : "N/A", defined($appsid->[2]) ? $appsid->[2] : "N/A"), 'red');
+		}
+		
+		# force modify depended objects
+		if ($scope eq 'users')
+		{
+		    if (defined $appsid->[0])
+		    {
+			debug(sprintf("Mark %s in user aliases for force update in next run", $appsid->[0]), 'yellow', ($DEBUG > 2));
+			$apps_data->{apps}->{aliases}->{$appsid->[0]}->{last} = 1;
+		    }
+		}
+		elsif ($scope eq 'members')
+		{
+		    if (!$process_status->{$requestobjectid}->{success})
+		    {
+			if (defined $appsid->[2])
+			{
+			    debug(sprintf("Mark %s in group members for force update in next run", $appsid->[2]), 'yellow', ($DEBUG > 2));
+			    $apps_data->{apps}->{members}->{$appsid->[2]}->{last} = 1;
+			}
+		    }
 		}
 	    }
 	}
@@ -1669,6 +1696,8 @@ sub traverse_apps_data_scope
 ##############################################################################
 # MAIN
 ##############################################################################
+
+$| = 1;
 
 my $TS_LAST_SAVE = time;
 
