@@ -178,7 +178,7 @@ sub AD_get_data_from_ldap
 		base      => "$base_dn,$base",
 		filter    => "(&(objectCategory=person)(objectClass=user))",
 		control   => [ $page ],
-		attrs     => [ "sAMAccountName", "givenName", "sn", "name", "userPrincipalName", "displayName", "employeeID", "whenChanged", "userAccountControl", "memberOf", "proxyAddresses" ],
+		attrs     => [ "sAMAccountName", "givenName", "sn", "name", "userPrincipalName", "displayName", "employeeID", "whenChanged", "userAccountControl", "memberOf", "proxyAddresses", "textEncodedORAddress" ],
 	    ],
 	},
 	photos => {
