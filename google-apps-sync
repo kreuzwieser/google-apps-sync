@@ -35,7 +35,6 @@ use MIME::Base64 qw(encode_base64 decode_base64 encode_base64url decode_base64ur
 use Encode qw(encode);
 use Try::Tiny;
 use Proc::PID::File;
-use Digest::MD5 qw(md5 md5_hex md5_base64);
 
 ##############################################################################
 # DUMPER SETTINGS
