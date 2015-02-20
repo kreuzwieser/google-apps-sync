@@ -667,6 +667,7 @@ sub diff_users
     my $scope = 'users';
     my $apps_ldapid_to_appsid = (); # conversion hash
 
+    my $source_for_patch_by_id = (); # additional attributes for patch
     my $apps = ();
     if (defined $apps_data->{apps}->{$scope}->{1}->{hash})
     {
@@ -687,7 +688,7 @@ sub diff_users
 		    includeInGlobalAddressList => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{includeInGlobalAddressList},
 		};
 		# generate conversion hash
-		$apps_ldapid_to_appsid->{$id} = $_;
+		$apps_ldapid_to_appsid->{$id}  = $_;
 	    }
 	}
     }
@@ -711,7 +712,12 @@ sub diff_users
 		                                        value      => $id,
 		                                        type       => "custom",
 		                                        customType => "employeeID"
-		                                    }
+		                                    },
+		                                    {
+                                                       value      => &{$APPS_CONFIG->{APPS_VERSHASH}}($apps_data->{ldap}->{$scope}->{data}->{byID}->{$_}),
+                                                       type       => "custom",
+                                                       customType => "pwdVersion"
+                                                    }
 		                                  ],
 		    kind                       => "admin#directory#user",
 		    isDelegatedAdmin           => JSON::false,
@@ -721,6 +727,9 @@ sub diff_users
 		    isAdmin                    => JSON::false,
 		    includeInGlobalAddressList => JSON::true,
 		};
+		# generate array for attributes where aren't readable from APPS as are attributes hashFunction and password
+		$source_for_patch_by_id->{$id} = { hashFunction => "SHA-1", password => &{$APPS_CONFIG->{APPS_PASSHASH}}($apps_data->{ldap}->{$scope}->{data}->{byID}->{$id}) };
+		#$source_for_patch_by_id->{$id} = { };
 	    }
 	}
     }
@@ -729,11 +738,13 @@ sub diff_users
 	    MAX_DEPTH   => 0,
 	    OWNDIFF_OUT => undef,
 	    OWNDIFF_IN  => {
-		scope                 => $scope,
-		apps_data_scope_part  => $apps_data->{apps}->{$scope}->{1}->{hash},
-		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
-		arrayids              => ['hash', 1],
-		source_for_patch      => { hashFunction => "SHA-1", password => $APPS_CONFIG->{APPS_UD_PASSHASH} },
+		scope                  => $scope,
+		apps_data_scope_part   => $apps_data->{apps}->{$scope}->{1}->{hash},
+		apps_ldapid_to_appsid  => $apps_ldapid_to_appsid,
+		arrayids               => [ 'hash', 1 ],
+		# TODO: oddelit pro kazdeho uzivatele zvlast
+                #source_for_patch       => { hashFunction => "SHA-1", password => &{$APPS_CONFIG->{APPS_PASSHASH}}() },
+                source_for_patch_by_id => $source_for_patch_by_id,
 	    }
 	};
 
@@ -940,7 +951,7 @@ sub diff_members
 		scope                 => $scope,
 		apps_data_scope_part  => $apps_data->{apps}->{$scope},
 		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
-		arrayids              => ['hash', 1],
+		arrayids              => [ 'hash', 1 ],
 		source_for_patch      => {},
 	    },
     };
@@ -1015,7 +1026,7 @@ sub diff_photos
 		scope                 => $scope,
 		apps_data_scope_part  => $apps_data->{apps}->{$scope},
 		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
-		arrayids              => ['hash'],
+		arrayids              => [ 'hash' ],
 		arrayids_add_add_id   => 1,
 		source_for_patch      => {},
 	    },
@@ -1093,7 +1104,7 @@ sub diff_aliases
 		scope                 => $scope,
 		apps_data_scope_part  => $apps_data->{apps}->{$scope},
 		apps_ldapid_to_appsid => $apps_ldapid_to_appsid,
-		arrayids              => ['hash'],
+		arrayids              => [ 'hash' ],
 		arrayids_add_add_id   => 1,
 		source_for_patch      => {},
 	    },
@@ -1199,7 +1210,8 @@ sub process_parallel
 			    debug(sprintf("ERROR answer for %s (requestobjectid %s) was %s : %s", $api_response->request->url, $requestobjectid, $api_response->code, $api_response->message), 'yellow');
 			    $ids->{$requestobjectid}->{try}++;
 			}
-			#printf(Dumper($api_response));
+			# TODO, xxx
+			debug(Dumper($api_response), 'yellow', ($DEBUG > 4));
 		    }
 		}
 		else
@@ -1417,13 +1429,11 @@ sub callback_common
 		my $requestobjectid = $pk; # default for ADD
 		if ((defined $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}) && (defined $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{$pk}))
 		{
-		    $requestobjectid = $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{$pk} 
+		    $requestobjectid = $arguments->{OWNDIFF_IN}->{apps_ldapid_to_appsid}->{$pk};
 		}
-	
-		# if (defined $arguments->{OWNDIFF_IN}->{source_for_patch}->{$arguments->{OWNDIFF_IN}->{scope}}); # for USERS
-		#$source_for_patch = patch_hash($source_for_patch, $arguments->{OWNDIFF_IN}->{apps_data_scope_part}->{$requestobjectid});
-		my $source_for_patch = patch_hash($arguments->{OWNDIFF_IN}->{source_for_patch}, $arguments->{OWNDIFF_IN}->{apps_data_scope_part}->{$requestobjectid});
-	
+		
+		my $source_for_patch = patch_hash(defined($arguments->{OWNDIFF_IN}->{source_for_patch_by_id}->{$pk}) ? $arguments->{OWNDIFF_IN}->{source_for_patch_by_id}->{$pk} : $arguments->{OWNDIFF_IN}->{source_for_patch}, $arguments->{OWNDIFF_IN}->{apps_data_scope_part}->{$requestobjectid});
+		
 		$arguments->{OWNDIFF_OUT}->{$operation}->{$requestobjectid} = {
 		    content         => patch_hash($source_for_patch, $b->{$pk}),
 		    header          => {
