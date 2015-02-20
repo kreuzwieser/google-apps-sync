@@ -1693,6 +1693,31 @@ sub traverse_apps_data_scope
     monitoring2("Process $scope data by traverse", ($DEBUG)); # end
 }
 
+sub print_help
+{
+
+    debug('Supported pamameters:', 'white');
+
+    debug('debug|d=numeber      - debug level', 'white');
+    debug('ldapusersflush|lfu   - flush LDAP and reload users data', 'white');
+    debug('ldapgroupsflush|lfg  - flush LDAP and reload groups data', 'white');
+    debug('ldapmembersflush|lfm - flush LDAP and reload members data', 'white');
+    debug('ldapphotosflush|lfp  - flush LDAP and reload prhotos data', 'white');
+
+    debug('appsusersflush|afu   - flush APPS and reload users data', 'white');
+    debug('appsgroupsflush|afg  - flush APPS and reload groups data', 'white');
+    debug('appsmembersflush|afm - flush APPS and reload members data', 'white');
+    debug('appsphotosflush|afp  - flush APPS and reload photos data', 'white');
+    debug('appsaliasesflush|afa - flush APPS and reload aliases data', 'white');
+
+    debug('simulate|s           - enable simulation (dosable all modify operations)', 'white');
+    debug('removeenable|r       - WARNING:enable remove operations!', 'white');
+
+    debug('help|h               - show this help', 'white');
+
+    exit 0;
+}
+
 ##############################################################################
 # MAIN
 ##############################################################################
@@ -1718,6 +1743,8 @@ GetOptions(
 
     'simulate|s'            => sub { $PROCESS                   = 0 },
     'removeenable|r'        => sub { $REMOVEENABLE              = 1 },
+
+    'help|h'                => \&print_help,
 );
 
 if (Proc::PID::File->running(dir=>"."))
