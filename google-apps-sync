@@ -67,7 +67,7 @@ BEGIN {
 
 # LWP::Parallet options
 use constant LWP_MAX_REQ      => 10; # max parallel requests
-use constant LWP_TIMEOUT      => 20; # in seconds
+use constant LWP_TIMEOUT      => 20; # timeout per request in seconds
 
 ##############################################################################
 # Organization specified
@@ -87,7 +87,7 @@ my $LDAP_SEARCH = GoogleAppSyncSettings::get_LDAP_SEARCH();
 my $access_token = undef;
 
 # default debug settings
-my $DEBUG         = 3; # 0 - 5
+my $DEBUG         = 2; # 0 - 5
 
 # default process or simulate only (1 = process)
 my $PROCESS       = 1;
@@ -108,7 +108,7 @@ my $cachetime = {
     apps => {
         users    => 1 * 24 * 3600,
         groups   => 1 * 24 * 3600,
-        members  => 1 * 24 * 3600,
+        members  => 3 * 24 * 3600,
         photos   => 3 * 24 * 3600,
         aliases  => 3 * 24 * 3600,
     },
