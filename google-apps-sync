@@ -87,7 +87,7 @@ my $LDAP_SEARCH = GoogleAppSyncSettings::get_LDAP_SEARCH();
 my $access_token = undef;
 
 # default debug settings
-my $DEBUG         = 2; # 0 - 5
+my $DEBUG         = 2; # 0 - 6
 
 # default process or simulate only (1 = process)
 my $PROCESS       = 1;
@@ -314,7 +314,7 @@ sub AD_get_all_new_data_from_ldap
 	}
 	else
 	{
-	    debug("Ldap data for $scope already cached", 'white', ($DEBUG > 4));
+	    debug("Ldap data for $scope already cached", 'white', ($DEBUG > 5));
 	}
     }
 
@@ -513,7 +513,7 @@ sub get_apps_data_scope
 	}
 	else
 	{
-	    debug("Google apps data for $scope/$requestobjectid already cached", 'white', ($DEBUG > 4));
+	    debug("Google apps data for $scope/$requestobjectid already cached", 'white', ($DEBUG > 5));
 	}
     }
 
@@ -522,7 +522,7 @@ sub get_apps_data_scope
 	my %ids_metadata = map { $_ => { try => 1, success => 0 } } @ids;
 	my $process_status = process_parallel(\&requests_generator_load, $objs_data, \%ids_metadata);
 	if (ref($process_status) eq 'HASH')
-	{
+	{ # we expect HASH
 	    foreach my $requestobjectid (keys %{$process_status})
 	    {
 		if ((defined $process_status->{$requestobjectid}->{success}) && ($process_status->{$requestobjectid}->{success}))
@@ -535,7 +535,10 @@ sub get_apps_data_scope
 			{ # for users, groups, members
 			    if (ref($content->{$scope_in_apps}) eq 'ARRAY')
 			    {
-				$data->{apps}->{$scope}->{$requestobjectid}->{hash} = {} if (!$objs_data->{$requestobjectid}->{page_counter});
+				if (!$objs_data->{$requestobjectid}->{page_counter})
+				{ # null hash
+				    $data->{apps}->{$scope}->{$requestobjectid}->{hash} = {};
+				}
 
 				foreach (@{$content->{$scope_in_apps}})
 				{ # transform array to hash
@@ -544,10 +547,15 @@ sub get_apps_data_scope
 			    }
 			}
 			else
-			{ # for photos
+			{ # empty array in reposnse
 			    if ($scope eq 'photos')
-			    {
+			    { # for photos is empty array allowed
 				$data->{apps}->{$scope}->{$requestobjectid}->{hash}->{$requestobjectid} = $content;
+			    }
+			    else
+			    { # regular empty array = no members, ...
+				debug(sprintf("D-empty $requestobjectid"), 'white');
+				$data->{apps}->{$scope}->{$requestobjectid}->{hash} = {};
 			    }
 			}
 
@@ -666,6 +674,7 @@ sub diff_users
 
     my $scope = 'users';
     my $apps_ldapid_to_appsid = (); # conversion hash
+    my $ids_uniqcheck_hash = ();
 
     my $source_for_patch_by_id = (); # additional attributes for patch
     my $apps = ();
@@ -675,6 +684,7 @@ sub diff_users
 	{
 	    if (defined (my $id = get_id_from_externalIds_etc($apps_data->{apps}->{$scope}->{1}->{hash}->{$_})))
 	    {
+		push @{$ids_uniqcheck_hash->{$id}}, $_;
 		$apps->{$id} = {
 		    name                       => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{name},
 		    primaryEmail               => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{primaryEmail},
@@ -691,6 +701,20 @@ sub diff_users
 		$apps_ldapid_to_appsid->{$id}  = $_;
 	    }
 	}
+    }
+
+    if (scalar(my @duplicate_empids = map {scalar(@{$ids_uniqcheck_hash->{$_}}) > 1 ? $_ : ()} (keys %{$ids_uniqcheck_hash})))
+    { # check for duplicate IDs
+	foreach my $dupl_empid (@duplicate_empids)
+	{
+	    debug("ERROR: duplicate ID $dupl_empid", 'red');
+	    foreach my $dupl_appsid (@{$ids_uniqcheck_hash->{$dupl_empid}})
+	    {
+		debug(sprintf(Dumper($apps_data->{apps}->{$scope}->{1}->{hash}->{$dupl_appsid})), 'yellow', ($DEBUG > 3));
+		
+	    }
+	}
+	exit 1;
     }
 
     my $ldap = ();
@@ -1789,6 +1813,7 @@ else
     # temporary for tests
     #debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
+    debug(sprintf("process priority: %s", join(" ", (sort { $traverse_config->{$a}->{priority} <=> $traverse_config->{$b}->{priority} } keys(%{$traverse_config})))), 'yellow');
     foreach my $scope (sort { $traverse_config->{$a}->{priority} <=> $traverse_config->{$b}->{priority} } keys(%{$traverse_config}))
     { # sync data between AD/LDAP and APPS
 	traverse_apps_data_scope($apps_data, $scope, diff_caller($scope, $apps_data));
