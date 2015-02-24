@@ -554,7 +554,6 @@ sub get_apps_data_scope
 			    }
 			    else
 			    { # regular empty array = no members, ...
-				debug(sprintf("D-empty $requestobjectid"), 'white');
 				$data->{apps}->{$scope}->{$requestobjectid}->{hash} = {};
 			    }
 			}
