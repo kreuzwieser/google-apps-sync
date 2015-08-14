@@ -3,7 +3,8 @@
 # Tomas Kreuzwieser <kreuzwieser@ro.vutbr.cz>, 2014, 2015
 
 # TODO:
-# otestovat http://stackoverflow.com/questions/7809740/how-can-i-catch-a-failed-to-decode-json-error-message-in-perl na test spravnosti jsonu
+# Otestovat http://stackoverflow.com/questions/7809740/how-can-i-catch-a-failed-to-decode-json-error-message-in-perl na test spravnosti jsonu.
+# Pokud dojde k tomu, ze bude vlozen user s ID, tak overit proc k tomu doslo a opravit. Dodelan test na existenci duplicit.
 # DONE:
 # projit a overit problem s autovivification
 
@@ -535,10 +536,7 @@ sub get_apps_data_scope
 			{ # for users, groups, members
 			    if (ref($content->{$scope_in_apps}) eq 'ARRAY')
 			    {
-				if (!$objs_data->{$requestobjectid}->{page_counter})
-				{ # null hash
-				    $data->{apps}->{$scope}->{$requestobjectid}->{hash} = {};
-				}
+				$data->{apps}->{$scope}->{$requestobjectid}->{hash} = {} if (!$objs_data->{$requestobjectid}->{page_counter}); # null hash
 
 				foreach (@{$content->{$scope_in_apps}})
 				{ # transform array to hash
@@ -667,6 +665,26 @@ sub primaryEmail
     return lc($email);
 }
 
+sub check_duplicates
+{
+    my ($ids_uniqcheck_hash, $scope, $apps_data) = @_;
+
+    if (scalar(my @duplicate_empids = map {scalar(@{$ids_uniqcheck_hash->{$_}}) > 1 ? $_ : ()} (keys %{$ids_uniqcheck_hash})))
+    { # check for duplicate IDs
+	foreach my $dupl_empid (@duplicate_empids)
+	{
+	    debug("ERROR: duplicate ID $dupl_empid", 'red');
+	    foreach my $dupl_appsid (@{$ids_uniqcheck_hash->{$dupl_empid}})
+	    {
+		debug(sprintf(Dumper($apps_data->{apps}->{$scope}->{1}->{hash}->{$dupl_appsid})), 'yellow', ($DEBUG > 3));
+		
+	    }
+	}
+	debug("ERROR: duplicate ID, exit. Fix IT!", 'red');
+	exit 1;
+    }
+}
+
 sub diff_users
 {
     my ($apps_data) = @_;
@@ -696,25 +714,14 @@ sub diff_users
 		    isAdmin                    => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{isAdmin},
 		    includeInGlobalAddressList => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{includeInGlobalAddressList},
 		};
+		# info: email aliases is necessary set as aliases
 		# generate conversion hash
 		$apps_ldapid_to_appsid->{$id}  = $_;
 	    }
 	}
     }
 
-    if (scalar(my @duplicate_empids = map {scalar(@{$ids_uniqcheck_hash->{$_}}) > 1 ? $_ : ()} (keys %{$ids_uniqcheck_hash})))
-    { # check for duplicate IDs
-	foreach my $dupl_empid (@duplicate_empids)
-	{
-	    debug("ERROR: duplicate ID $dupl_empid", 'red');
-	    foreach my $dupl_appsid (@{$ids_uniqcheck_hash->{$dupl_empid}})
-	    {
-		debug(sprintf(Dumper($apps_data->{apps}->{$scope}->{1}->{hash}->{$dupl_appsid})), 'yellow', ($DEBUG > 3));
-		
-	    }
-	}
-	exit 1;
-    }
+    check_duplicates($ids_uniqcheck_hash, $scope, $apps_data);
 
     my $ldap = ();
     if (defined $apps_data->{ldap}->{$scope}->{data}->{byID})
@@ -752,7 +759,6 @@ sub diff_users
 		};
 		# generate array for attributes where aren't readable from APPS as are attributes hashFunction and password
 		$source_for_patch_by_id->{$id} = { hashFunction => "SHA-1", password => &{$APPS_CONFIG->{APPS_PASSHASH}}($apps_data->{ldap}->{$scope}->{data}->{byID}->{$id}) };
-		#$source_for_patch_by_id->{$id} = { };
 	    }
 	}
     }
@@ -765,8 +771,6 @@ sub diff_users
 		apps_data_scope_part   => $apps_data->{apps}->{$scope}->{1}->{hash},
 		apps_ldapid_to_appsid  => $apps_ldapid_to_appsid,
 		arrayids               => [ 'hash', 1 ],
-		# TODO: oddelit pro kazdeho uzivatele zvlast
-                #source_for_patch       => { hashFunction => "SHA-1", password => &{$APPS_CONFIG->{APPS_PASSHASH}}() },
                 source_for_patch_by_id => $source_for_patch_by_id,
 	    }
 	};
@@ -791,6 +795,7 @@ sub diff_groups
 
     my $scope = 'groups';
     my $apps_ldapid_to_appsid = (); # conversion hash
+    my $ids_uniqcheck_hash = ();
 
     my $apps = ();
     if (defined $apps_data->{apps}->{$scope}->{1}->{hash})
@@ -799,6 +804,7 @@ sub diff_groups
 	{
 	    if (defined (my $id = get_id_from_description($apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{description})))
 	    {
+		push @{$ids_uniqcheck_hash->{$id}}, $_;
 		$apps->{$id} = {
 		    email       => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{email},
 		    name        => $apps_data->{apps}->{$scope}->{1}->{hash}->{$_}->{name},
@@ -810,6 +816,8 @@ sub diff_groups
 	    }
 	}
     }
+
+    check_duplicates($ids_uniqcheck_hash, $scope, $apps_data);
 
     my $ldap = ();
     if (defined $apps_data->{ldap}->{$scope}->{data}->{byID})
@@ -1106,14 +1114,15 @@ sub diff_aliases
 	{
 	    if (defined (my $id = $apps_data->{ldap}->{users}->{data}->{byID}->{$_}->{employeeID}))
 	    {
-		if (defined $apps->{$id}->{users}) # only for IDs in APPS
-		{ # no aliases at this moment
-		    $ldap->{$id}->{users} = {};
-
-		    my $alias = sprintf("%s%s%s", $id, '@', $APPS_CONFIG->{APPS_DOMAIN});
-		    if ($alias ne $apps_data->{ldap}->{users}->{data}->{byID}->{$_}->{userPrincipalName})
+		$ldap->{$id}->{users} = {}; # initialize
+		foreach my $address (keys %{$apps_data->{ldap}->{users}->{data}->{byID}->{$_}->{proxyAddresses}})
+		{
+		    if ($address=~/^[sSmMtTpP]+\:(.+\@$APPS_CONFIG->{APPS_DOMAIN})$/)
 		    {
-			$ldap->{$id}->{users}->{$alias} = 1;
+			if ($1 ne $apps_data->{ldap}->{users}->{data}->{byID}->{$_}->{userPrincipalName})
+			{
+			    $ldap->{$id}->{users}->{$1} = 1;
+			}
 		    }
 		}
 	    }
@@ -1133,7 +1142,7 @@ sub diff_aliases
 	    },
     };
 
-    # compare APPS and LDAP user photos structures
+    # compare APPS and LDAP user aliases structures
     Diff::compare_and_process($apps, $ldap,
 	{
 	    MATCH     => sub {},
@@ -1812,7 +1821,7 @@ else
     # temporary for tests
     #debug(sprintf("DEBUG: data structure hash %s", md5_hex(to_json($apps_data, {utf8 => 1}))), 'white', ($DEBUG > 3));
 
-    debug(sprintf("process priority: %s", join(" ", (sort { $traverse_config->{$a}->{priority} <=> $traverse_config->{$b}->{priority} } keys(%{$traverse_config})))), 'yellow');
+    debug(sprintf("Process priority: %s", join(", ", (sort { $traverse_config->{$a}->{priority} <=> $traverse_config->{$b}->{priority} } keys(%{$traverse_config})))), 'yellow', ($DEBUG > 3));
     foreach my $scope (sort { $traverse_config->{$a}->{priority} <=> $traverse_config->{$b}->{priority} } keys(%{$traverse_config}))
     { # sync data between AD/LDAP and APPS
 	traverse_apps_data_scope($apps_data, $scope, diff_caller($scope, $apps_data));
